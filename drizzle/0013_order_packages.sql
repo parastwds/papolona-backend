@@ -1,0 +1,2 @@
+ALTER TABLE "stone_orders" ADD COLUMN "package" text DEFAULT 'stone_triptych' NOT NULL;--> statement-breakpoint
+ALTER TABLE "stone_orders" ADD CONSTRAINT "stone_orders_package_check" CHECK ("stone_orders"."package" in ('stone_triptych', 'retreat'));

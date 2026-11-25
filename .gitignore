@@ -1,0 +1,15 @@
+node_modules/
+.env
+coverage/
+*.log
+.env.*
+!.env.example
+# Local PGlite database (DATABASE_URL=pglite://.local-db)
+.local-db/
+# Agent worktrees and local tool files (were in .git/info/exclude)
+.kilo/worktrees/
+.kilo/agent-manager.json
+.kilo/setup-script*
+.kilocode/worktrees/
+.kilocode/agent-manager.json
+.kilocode/setup-script*

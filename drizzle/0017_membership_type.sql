@@ -1,0 +1,2 @@
+ALTER TABLE "users" ADD COLUMN "membership_type" text;--> statement-breakpoint
+ALTER TABLE "users" ADD CONSTRAINT "users_membership_type_check" CHECK ("users"."membership_type" is null or "users"."membership_type" in ('explorer', 'creator', 'collector'));
