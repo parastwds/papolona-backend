@@ -14,7 +14,7 @@ const standing = require('../membership/standing');
 /**
  * The marketplace: active members sell the NFTs they own (converted emblems, their own or bought).
  * Papolona is the seller's agent and offers each NFT to Collectors first:
- * - Collectors' auction: for AUCTION_COLLECTOR_DAYS (90) after listing, only Collector members see the NFT
+ * - Collectors' auction: for AUCTION_COLLECTOR_DAYS (30) after listing, only Collector members see the NFT
  *   and bid on it, from the seller's starting price (at least Papolona's suggested minimum). Each bid must
  *   beat the highest so far. When the days are up the highest bidder wins and pays their bid.
  * - Open to all: with no bids by then, anyone signed in can buy it at the starting price, apprentices and

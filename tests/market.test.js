@@ -398,19 +398,19 @@ describe('Collectors’ auction', () => {
     return { token: tokens.accessToken, userId: user.id };
   }
 
-  test('a new listing is a Collectors’ auction for 90 days, seen by Collectors only', async () => {
+  test('a new listing is a Collectors’ auction for 30 days, seen by Collectors only', async () => {
     const seller = await activeSeller('Ada Lovelace');
     const listing = (await list(seller.token, seller.nft.id, 12000)).body.data.listing;
     const days = (new Date(listing.auction.collectorsUntil) - Date.now()) / (24 * 60 * 60 * 1000);
-    expect(days).toBeGreaterThan(89.9);
-    expect(days).toBeLessThanOrEqual(90);
+    expect(days).toBeGreaterThan(29.9);
+    expect(days).toBeLessThanOrEqual(30);
     expect(listing.auction).toMatchObject({ phase: 'collectors', bidCount: 0, minNextBidCents: 12000, canBid: false });
 
     const c = await collector('Cora Collector');
     const market = (await api().get('/api/v1/market/listings').set(bearer(c.token))).body.data;
     expect(market.listings.map((l) => l.id)).toEqual([listing.id]);
     expect(market.listings[0].auction).toMatchObject({ phase: 'collectors', canBid: true, canBuy: false });
-    expect(market.auctionDays).toBe(90);
+    expect(market.auctionDays).toBe(30);
 
     // An Explorer (or any non-Collector member) sees nothing yet and cannot bid.
     const explorer = await member('Ed Explorer');

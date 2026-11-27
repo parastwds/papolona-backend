@@ -25,14 +25,14 @@ const standing = require('../membership/standing');
  * awarded; ones earned before stay in user_badges.
  */
 
-// Grids from the client's spec (3: 1 x 3, 6: 2 x 3, 12: 3 x 4, 24: 4 x 6).
+// Every grid is three wide and grows lengthwise (3: 1 x 3, 6: 2 x 3, 12: 4 x 3, 24: 8 x 3).
 const OPTIONS = [
   { length: 1, label: 'Single', rows: 1, cols: 1, rarity: 'common', badge: null, nftEligible: false },
   { length: 2, label: 'Twin', rows: 1, cols: 2, rarity: 'common', badge: null, nftEligible: false },
   { length: 3, label: 'Triple', rows: 1, cols: 3, rarity: 'common', badge: null, nftEligible: true },
   { length: 6, label: 'Hexa', rows: 2, cols: 3, rarity: 'epic', badge: null, nftEligible: true },
-  { length: 12, label: 'Dozen', rows: 3, cols: 4, rarity: 'mythic', badge: null, nftEligible: true },
-  { length: 24, label: 'Double Dozen', rows: 4, cols: 6, rarity: 'legendary', badge: null, nftEligible: true },
+  { length: 12, label: 'Dozen', rows: 4, cols: 3, rarity: 'mythic', badge: null, nftEligible: true },
+  { length: 24, label: 'Double Dozen', rows: 8, cols: 3, rarity: 'legendary', badge: null, nftEligible: true },
 ];
 // What converting each level's set of emblems into an NFT costs (the client's provisional prices). Prices
 // are set per level, as a class, so they change together; the same values are the recommended minimum

@@ -119,7 +119,7 @@ const schema = z.object({
   MARKET_FEE_PERCENT: z.coerce.number().int().min(0).max(100).default(50),
   // A new listing is first an auction for Collectors, for this many days; the highest bid wins. With no
   // bids by then it opens to everyone at its starting price.
-  AUCTION_COLLECTOR_DAYS: z.coerce.number().positive().default(90),
+  AUCTION_COLLECTOR_DAYS: z.coerce.number().positive().default(30),
   // Each bid must beat the highest so far by at least this percent of it (and at least $1).
   AUCTION_MIN_INCREMENT_PERCENT: z.coerce.number().min(0).max(100).default(5),
   // A reading must be completed (passed) within this long of drawing its clue, or it fails; a member's
