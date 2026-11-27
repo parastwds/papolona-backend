@@ -87,9 +87,38 @@ const toPublicListing = (l) =>
  * What the app sees: never the reveal order, so the tiles still to come stay hidden. `listing` is its open
  * marketplace listing, if any.
  */
-const toPublicSeries = (series, badges = [], listing = null) =>
+// The membership a series was made under, as its reference code.
+const REF_CODES = { explorer: 'EX', creator: 'CR', collector: 'CO', universal: 'UN' };
+const refCodeFor = (user) => REF_CODES[user.membershipType] ?? 'ME';
+
+/** "CR3-00042": membership code, level (P for a practice single or twin), running number. */
+function referenceOf(series) {
+  if (series.refSeq == null) return null;
+  const level = { 3: '1', 6: '2', 12: '3', 24: '4' }[series.length] ?? 'P';
+  return `${series.refCode ?? 'ME'}${level}-${String(series.refSeq).padStart(5, '0')}`;
+}
+
+/** "Ada L." from "Ada Lovelace", as everywhere members are named to others. */
+const shortName = (name = '') => {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return parts[0] ?? 'Member';
+  return `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.`;
+};
+
+// The latest sale of a series, for the app: { priceCents, currency, soldAt, buyer, seller }.
+const toPublicSale = (sale) =>
+  sale && {
+    priceCents: sale.priceCents,
+    currency: sale.currency,
+    soldAt: sale.soldAt,
+    buyer: sale.buyerName ? shortName(sale.buyerName) : null,
+    seller: shortName(sale.sellerName),
+  };
+
+const toPublicSeries = (series, badges = [], listing = null, lastSale = null) =>
   series && {
     id: series.id,
+    reference: referenceOf(series),
     length: series.length,
     rows: series.rows,
     cols: series.cols,
@@ -116,13 +145,19 @@ const toPublicSeries = (series, badges = [], listing = null) =>
     // Bought on the marketplace rather than made by its owner.
     acquired: Boolean(series.creatorId && series.creatorId !== series.userId),
     listing: toPublicListing(listing),
+    // Its latest marketplace sale, if it has changed hands.
+    lastSale: toPublicSale(lastSale),
   };
 
 /** Many series for the app, each with its badges and open listing. */
 async function withBadges(list) {
   const completed = list.filter((s) => s.status === 'completed').map((s) => s.id);
-  const [byId, listings] = await Promise.all([db.badges.bySeries(completed), db.market.activeBySeries(completed)]);
-  return list.map((s) => toPublicSeries(s, byId[s.id] ?? [], listings[s.id] ?? null));
+  const [byId, listings, sales] = await Promise.all([
+    db.badges.bySeries(completed),
+    db.market.activeBySeries(completed),
+    db.market.lastSalesBySeries(completed),
+  ]);
+  return list.map((s) => toPublicSeries(s, byId[s.id] ?? [], listings[s.id] ?? null, sales[s.id] ?? null));
 }
 
 const withBadgesOne = async (series) => (series ? (await withBadges([series]))[0] : null);
@@ -162,9 +197,12 @@ async function getActive(userId) {
 async function list(userId) {
   await failIfExpired(userId, new Date());
   const all = await db.series.list(userId);
+  // A failed series is kept even without emblems: its failed reading shows as a placeholder.
   return withBadges(
     all.filter(
-      (s) => !LOST_STATUSES.includes(s.status) || (s.artworkKey !== NO_ARTWORK && s.revealedTiles.length > 0),
+      (s) =>
+        !LOST_STATUSES.includes(s.status) ||
+        (s.artworkKey !== NO_ARTWORK && (s.revealedTiles.length > 0 || s.status === 'failed')),
     ),
   );
 }
@@ -198,6 +236,7 @@ async function start(signedIn, { length }, now = new Date()) {
       artworkKey: ARTWORK_KEYS[crypto.randomInt(ARTWORK_KEYS.length)],
       revealOrder: shuffledTiles(option.length),
       startedAt: now,
+      refCode: refCodeFor(user),
       // Set again as each reading is drawn: that reading's deadline.
       deadlineAt: new Date(now.getTime() + windowMs()),
     });

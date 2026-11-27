@@ -313,6 +313,15 @@ describe('marketplace', () => {
     expect(bought.status).toBe(201);
     expect(bought.body.data.payment).toMatchObject({ purpose: 'nft_purchase', amountCents: 20000 });
     expect(bought.body.data.series).toMatchObject({ id: seller.nft.id, acquired: true, listing: null });
+    // Its last sale travels with it, with who sold and who bought.
+    const [owned] = (await api().get('/api/v1/series').set(bearer(token))).body.data.series;
+    expect(owned.lastSale).toEqual({
+      priceCents: 20000,
+      currency: expect.any(String),
+      soldAt: expect.any(String),
+      buyer: 'Grace H.',
+      seller: 'Ada L.',
+    });
     expect(bought.body.data.listing.status).toBe('sold');
 
     const sale = await db.market.findOffer(listing.id);
@@ -383,6 +392,24 @@ describe('marketplace', () => {
     env.DEMO_PAYMENTS = false;
     const buyer = await member('Buyer');
     expect((await buy(buyer.token, listing.id)).status).toBe(503);
+  });
+});
+
+describe('reference numbers', () => {
+  test('each series gets a reference: membership code, level and a running number', async () => {
+    const m = await member('Ada Lovelace');
+    const first = await complete(m.token, 3);
+    // A member without a membership type is coded ME.
+    expect(first.reference).toMatch(/^ME1-\d{5}$/);
+    await db.users.update(m.userId, { membershipType: 'creator' });
+    const second = await complete(m.token, 6);
+    expect(second.reference).toMatch(/^CR2-\d{5}$/);
+    const n = (ref) => Number(ref.split('-')[1]);
+    expect(n(second.reference)).toBeGreaterThan(n(first.reference));
+    // The code is the membership it was made under, even after a change.
+    await db.users.update(m.userId, { membershipType: 'explorer' });
+    const list = (await api().get('/api/v1/series').set(bearer(m.token))).body.data.series;
+    expect(list.map((s) => s.reference).sort()).toEqual([first.reference, second.reference].sort());
   });
 });
 

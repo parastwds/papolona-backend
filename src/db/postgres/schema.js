@@ -6,7 +6,7 @@
  * Allowed values (status, source...) are CHECK constraints, which are easier to change than enum types.
  */
 const { sql } = require('drizzle-orm');
-const { pgTable, uuid, text, integer, boolean, timestamp, jsonb, doublePrecision, index, uniqueIndex, check, primaryKey } =
+const { pgTable, uuid, text, integer, serial, boolean, timestamp, jsonb, doublePrecision, index, uniqueIndex, check, primaryKey } =
   require('drizzle-orm/pg-core');
 
 const id = () => uuid('id').primaryKey().default(sql`uuidv7()`);
@@ -273,6 +273,11 @@ const nftSeries = pgTable(
     // Converted into an NFT (a paid conversion, demo payments for now), or null.
     convertedAt: at('converted_at'),
     conversionPaymentId: uuid('conversion_payment_id').references(() => payments.id, { onDelete: 'set null' }),
+    // Its reference number: a running number across Papolona, and the membership it was made under
+    // (EX Explorer, CR Creator, CO Collector, UN Universal, ME a member from before memberships existed).
+    // Shown as e.g. CR3-00042 (membership, level, number).
+    refSeq: serial('ref_seq'),
+    refCode: text('ref_code').notNull().default('ME'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

@@ -211,6 +211,30 @@ const market = {
     return toOffer(row ?? null);
   },
 
+  /**
+   * The latest sale of each of these series: { [seriesId]: { priceCents, currency, soldAt, buyerName,
+   * sellerName } }. Series never sold are left out.
+   */
+  async lastSalesBySeries(seriesIds) {
+    if (seriesIds.length === 0) return {};
+    const Seller = alias(U, 'seller');
+    const rows = await db()
+      .selectDistinctOn([L.seriesId], {
+        seriesId: L.seriesId,
+        priceCents: L.priceCents,
+        currency: L.currency,
+        soldAt: L.soldAt,
+        buyerName: B.name,
+        sellerName: Seller.name,
+      })
+      .from(L)
+      .innerJoin(Seller, eq(Seller.id, L.sellerId))
+      .leftJoin(B, eq(B.id, L.buyerId))
+      .where(and(inArray(L.seriesId, seriesIds), eq(L.status, 'sold')))
+      .orderBy(L.seriesId, desc(L.soldAt));
+    return Object.fromEntries(rows.map((r) => [r.seriesId, r]));
+  },
+
   /** Open listings of these series: { [seriesId]: listing }. */
   async activeBySeries(seriesIds) {
     if (seriesIds.length === 0) return {};
