@@ -17,6 +17,8 @@ const { community } = require('./community');
 const { market } = require('./market');
 const { billing } = require('./billing');
 const { retreat } = require('./retreat');
+const { dms } = require('./dms');
+const { members } = require('./members');
 const testing = require('./testing');
 
 const hostOf = (url) => {
@@ -80,5 +82,7 @@ module.exports = {
   market,
   billing,
   retreat,
+  dms,
+  members,
   testing,
 };

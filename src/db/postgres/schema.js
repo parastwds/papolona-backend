@@ -586,6 +586,78 @@ const journalInsights = pgTable(
   ],
 );
 
+const DM_STATUSES = ['pending', 'accepted', 'declined'];
+
+// Direct messages: one thread per pair of users (user_a is the smaller id, user_b the larger). It opens as
+// a message request from requested_by; once the other accepts, both can write. Each side's read_at marks
+// what they have seen.
+const dmThreads = pgTable(
+  'dm_threads',
+  {
+    id: id(),
+    userA: uuid('user_a').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    userB: uuid('user_b').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    requestedBy: uuid('requested_by').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending'),
+    acceptedAt: at('accepted_at'),
+    lastMessageAt: at('last_message_at'),
+    userAReadAt: at('user_a_read_at'),
+    userBReadAt: at('user_b_read_at'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('dm_threads_pair_idx').on(t.userA, t.userB),
+    index('dm_threads_user_b_idx').on(t.userB),
+    check('dm_threads_status_check', oneOf(t.status, DM_STATUSES)),
+    check('dm_threads_order_check', sql`${t.userA} < ${t.userB}`),
+  ],
+);
+
+const dmMessages = pgTable(
+  'dm_messages',
+  {
+    id: id(),
+    threadId: uuid('thread_id').notNull().references(() => dmThreads.id, { onDelete: 'cascade' }),
+    senderId: uuid('sender_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    text: text('text').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index('dm_messages_thread_idx').on(t.threadId, t.createdAt)],
+);
+
+// A user blocking another: neither can message the other, and they stop appearing to each other in search.
+const userBlocks = pgTable(
+  'user_blocks',
+  {
+    blockerId: uuid('blocker_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    blockedId: uuid('blocked_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.blockerId, t.blockedId] }), index('user_blocks_blocked_idx').on(t.blockedId)],
+);
+
+const ACCESS_STATUSES = ['pending', 'approved', 'denied'];
+
+// A member asking to see another member's readings and NFTs on their profile. The owner approves or denies.
+const profileAccess = pgTable(
+  'profile_access',
+  {
+    id: id(),
+    ownerId: uuid('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    viewerId: uuid('viewer_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending'),
+    answeredAt: at('answered_at'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('profile_access_pair_idx').on(t.ownerId, t.viewerId),
+    index('profile_access_owner_status_idx').on(t.ownerId, t.status),
+    check('profile_access_status_check', oneOf(t.status, ACCESS_STATUSES)),
+  ],
+);
+
 module.exports = {
   questionnaires,
   users,
@@ -609,6 +681,10 @@ module.exports = {
   retreatApplications,
   nftListings,
   nftBids,
+  dmThreads,
+  dmMessages,
+  userBlocks,
+  profileAccess,
   MINT_CHOICES,
   BADGES,
 };

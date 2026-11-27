@@ -6,6 +6,10 @@ const { users, journalEntries, passwordResets, pendingChanges, clueDraws, nftSer
 
 // Everything a test creates; the seeded questionnaire and app config are kept.
 const USER_DATA = [
+  'profile_access',
+  'dm_messages',
+  'dm_threads',
+  'user_blocks',
   'nft_bids',
   'nft_listings',
   'stone_orders',
