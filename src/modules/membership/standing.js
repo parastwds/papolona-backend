@@ -4,7 +4,8 @@ const db = require('../../db');
 /**
  * Standing: Creators and Collectors keep their membership by meeting its terms within each period of
  * STANDING_PERIOD_DAYS, counted from when they chose it (their first period is free of terms):
- * - Creator: convert a completed series into an NFT at least once a period.
+ * - Creator: convert a completed series into an NFT at least once a period. A provisional Creator (before
+ *   their first Level 1 conversion) has no terms yet; their first period starts when they become full.
  * - Collector: pay the Collector fee, or buy a member's NFT and keep at least COLLECTOR_MIN_WALLET_CENTS
  *   in their wallet, or buy art (members' NFTs) worth COLLECTOR_ART_YEAR_CENTS in 12 months, which covers
  *   those 12 months.
@@ -44,9 +45,14 @@ async function standing(user, now = new Date()) {
   const type = user.membershipType;
   const base = { required: false, type: type ?? null, met: true, dueBy: null, periodDays: env.STANDING_PERIOD_DAYS };
   if (user.status !== 'member' || (type !== 'creator' && type !== 'collector')) return base;
+  if (type === 'creator' && !user.creatorConfirmedAt) return { ...base, type };
 
-  // The first period runs from when the membership was chosen.
-  const since = user.membershipTypeSince ?? user.memberSince ?? now;
+  // The first period runs from when the membership was chosen (for a Creator, from when they became full,
+  // if that was later).
+  const since =
+    (type === 'creator' ? latest(user.membershipTypeSince, user.creatorConfirmedAt) : user.membershipTypeSince) ??
+    user.memberSince ??
+    now;
   const firstPeriodEnds = plusPeriod(since);
   const walletCents = user.walletCents ?? 0;
 
@@ -61,7 +67,7 @@ async function standing(user, now = new Date()) {
       lastConversionAt: lastConversionAt ?? null,
       walletCents,
       depositCents: env.CREATOR_DEPOSIT_CENTS,
-      currency: env.MEMBERSHIP_CURRENCY,
+      currency: 'PNY',
     };
   }
 
@@ -93,7 +99,7 @@ async function standing(user, now = new Date()) {
     artYearCents: art.artYearCents,
     artYearTargetCents: env.COLLECTOR_ART_YEAR_CENTS,
     artCoveredUntil: art.artCoveredUntil,
-    currency: env.MEMBERSHIP_CURRENCY,
+    currency: 'PNY',
   };
 }
 

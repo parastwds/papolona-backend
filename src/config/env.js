@@ -96,6 +96,17 @@ const schema = z.object({
   MEMBERSHIP_CREATOR_CENTS: z.coerce.number().int().nonnegative().default(2500),
   MEMBERSHIP_COLLECTOR_CENTS: z.coerce.number().int().nonnegative().default(0),
   MEMBERSHIP_CURRENCY: z.string().length(3).default('EUR'),
+  // Papolona pennies (see pennies.service): 1 penny = 1 cent, so the *_CENTS prices above and the
+  // conversion and listing prices are in pennies. Every new user starts with 1,000 (the column default).
+  // What the everyday actions cost, the daily bonus, and the currency penny packs are sold in (the one
+  // real-money purchase).
+  PENNY_DAILY_BONUS: z.coerce.number().int().nonnegative().default(10),
+  PENNY_READING_PRICE: z.coerce.number().int().nonnegative().default(10),
+  PENNY_PROMPT_PRICE: z.coerce.number().int().nonnegative().default(5),
+  PENNY_MESSAGE_REQUEST_PRICE: z.coerce.number().int().nonnegative().default(20),
+  PENNY_PACK_CURRENCY: z.string().length(3).default('EUR'),
+  // How often a Collector is reminded (by email) that they can start creating too.
+  COLLECTOR_NUDGE_DAYS: z.coerce.number().int().positive().default(30),
   // Creators and Collectors keep their membership by meeting its terms within each period of this many days,
   // counted from when they chose it; otherwise they return to Explorer. Demo values while no payment
   // method is set up:

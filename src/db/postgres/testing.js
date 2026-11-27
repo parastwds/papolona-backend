@@ -69,6 +69,12 @@ module.exports = {
     await db().execute(sql`update nft_listings set collectors_until = now() - interval '1 second' where id = ${listingId}`);
   },
 
+  /** Makes a Creator a full Creator now, as their first Level 1 conversion would. */
+  async confirmCreator(userId) {
+    assertTest();
+    await db().update(users).set({ creatorConfirmedAt: new Date() }).where(eq(users.id, userId));
+  },
+
   /** Moves the user's sign-up back by `days`, as if they had joined earlier (the apprenticeship's days). */
   async backdateUser(userId, days) {
     assertTest();

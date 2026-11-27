@@ -46,14 +46,6 @@ router.put('/type', changeLimiter, validate({ body: typeSchema }), async (req, r
   res.json({ success: true, data: await membershipService.chooseType(req.user, req.body.type) });
 });
 
-/**
- * POST /membership/wallet — { amountCents }: puts money into the member's wallet (demo payments).
- * Returns { membership, payment }. 400 INVALID_AMOUNT, 403 MEMBERSHIP_REQUIRED, 503 PAYMENTS_UNAVAILABLE.
- */
-const depositSchema = z.object({ amountCents: z.number().int() });
-router.post('/wallet', changeLimiter, validate({ body: depositSchema }), async (req, res) => {
-  res.status(201).json({ success: true, data: await membershipService.depositToWallet(req.user, req.body.amountCents) });
-});
 
 /**
  * POST /membership/donation — { amountCents }: a gift to Papolona from any signed-in user (demo payments).

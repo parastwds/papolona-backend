@@ -216,21 +216,53 @@ async function dispatchLastHour(now) {
   return result;
 }
 
+function collectorMail({ name }) {
+  return {
+    subject: 'You can start creating too',
+    text: [
+      `Hello ${name || 'there'},`,
+      '',
+      'As a Collector you support the members who create. You can create too: switch to Creator in the Papolona app (Profile > Membership). You start as a provisional Creator with Single, Twin and Level 1 readings, and your first Level 1 series converted into an NFT makes you a full Creator.',
+      '',
+      'You get this email because product updates are on. You can turn them off in the app: Profile > Notifications.',
+    ].join('\n'),
+  };
+}
+
+/** Every COLLECTOR_NUDGE_DAYS, reminds each Collector (a Collector that long) that they can start creating. */
+async function dispatchCollectors(now) {
+  const result = { sent: 0, failed: 0 };
+  const since = new Date(now.getTime() - env.COLLECTOR_NUDGE_DAYS * 24 * 60 * 60 * 1000);
+  const due = await db.users.collectorNudgeCandidates(since, BATCH);
+  for (const user of due) {
+    if (!(await db.users.claimCollectorNudge(user.id, since, now))) continue;
+    try {
+      await sendMail({ to: user.email, ...collectorMail(user) });
+      result.sent += 1;
+    } catch (err) {
+      result.failed += 1;
+      logger.error(`Collector reminder for ${user.id} failed`, err.message);
+    }
+  }
+  return result;
+}
+
 async function dispatchDue(now = new Date()) {
   const reminders = await dispatchCustom(now);
   const readings = await dispatchReadings(now);
   const active = await dispatchActive(now);
   const lastHour = await dispatchLastHour(now);
+  const collectors = await dispatchCollectors(now);
   // Collectors' auctions that have closed: each NFT goes to its highest bidder. Required here, not at the
   // top, to keep the market's dependencies out of the reminders module's load order.
   const auctions = await require('../market/market.service').settleDueAuctions(now);
-  const total = [reminders, readings, active, lastHour].reduce((n, r) => n + r.sent + r.failed, 0);
+  const total = [reminders, readings, active, lastHour, collectors].reduce((n, r) => n + r.sent + r.failed, 0);
   if (total > 0) {
     logger.info(
-      `Reminders: ${reminders.sent} sent, ${reminders.failed} failed; reading reminders: ${readings.sent} sent, ${readings.failed} failed; active membership: ${active.sent} sent, ${active.failed} failed; last hour: ${lastHour.sent} sent, ${lastHour.failed} failed`,
+      `Reminders: ${reminders.sent} sent, ${reminders.failed} failed; reading reminders: ${readings.sent} sent, ${readings.failed} failed; active membership: ${active.sent} sent, ${active.failed} failed; last hour: ${lastHour.sent} sent, ${lastHour.failed} failed; collectors: ${collectors.sent} sent, ${collectors.failed} failed`,
     );
   }
-  return { reminders, readings, active, lastHour, auctions };
+  return { reminders, readings, active, lastHour, collectors, auctions };
 }
 
 module.exports = { list, create, update, remove, dispatchDue, MAX_REMINDERS };

@@ -3,6 +3,7 @@ const { alias } = require('drizzle-orm/pg-core');
 const { db } = require('./connection');
 const { nftSeries: S, clueDraws: D, payments: P, users: U, nftListings: L } = require('./schema');
 const { translateDuplicate } = require('./shared');
+const { spendIn, pennyPayment } = require('./pennies');
 
 // The whole series, revealOrder included; the service decides what the app sees.
 const toSeries = (row) =>
@@ -202,7 +203,7 @@ Object.assign(series, {
    * `choice` is 'mint' or 'mint_poc'. Resolves to { series, payment }, or null when the series is not the
    * user's, not completed, or already converted (so a double tap pays once).
    */
-  async convert(userId, id, choice, payment, now = new Date()) {
+  async convert(userId, id, choice, { price, membershipFee = 0, confirmCreator = false }, now = new Date()) {
     return db().transaction(async (tx) => {
       const [row] = await tx
         .select()
@@ -210,10 +211,27 @@ Object.assign(series, {
         .where(and(eq(S.id, id), eq(S.userId, userId), eq(S.status, 'completed'), isNull(S.convertedAt)))
         .for('update');
       if (!row) return null;
+      // Paid in pennies: short of them, spendIn throws and nothing here is saved.
       const [paid] = await tx
         .insert(P)
-        .values({ userId, purpose: 'conversion', status: 'succeeded', ...payment })
+        .values({ userId, purpose: 'conversion', status: 'succeeded', createdAt: now, ...pennyPayment(price) })
         .returning();
+      await spendIn(tx, userId, price, 'conversion', id, now);
+      // A provisional Creator's first Level 1 conversion makes them a full Creator: their first month's fee
+      // is paid with it, and their first two-month period starts now.
+      if (confirmCreator) {
+        if (membershipFee > 0) {
+          const [fee] = await tx
+            .insert(P)
+            .values({ userId, purpose: 'membership', status: 'succeeded', createdAt: now, ...pennyPayment(membershipFee) })
+            .returning();
+          await spendIn(tx, userId, membershipFee, 'membership', fee.id, now);
+        }
+        await tx
+          .update(U)
+          .set({ creatorConfirmedAt: now, membershipTypeSince: now, updatedAt: now })
+          .where(and(eq(U.id, userId), isNull(U.creatorConfirmedAt)));
+      }
       const [updated] = await tx
         .update(S)
         .set({ convertedAt: now, conversionPaymentId: paid.id, mintChoice: choice, mintChoiceAt: now, updatedAt: now })
@@ -223,7 +241,6 @@ Object.assign(series, {
     });
   },
 
-  /** Records the mint choice on the user's completed series. Resolves to the series, or null. */
   async setMintChoice(userId, id, choice, now = new Date()) {
     const [row] = await db()
       .update(S)

@@ -3,7 +3,7 @@ const db = require('../src/db');
 const { qrng } = require('../src/modules/clue/clue.service');
 const judgeAi = require('../src/modules/clue/judge.ai');
 const { publicName } = require('../src/modules/artwork/artwork.service');
-const { setupDB, resetData, teardownDB, api, registerUser, bearer } = require('./helpers');
+const { setupDB, resetData, teardownDB, api, registerUser, bearer, givePennies } = require('./helpers');
 
 beforeAll(() => setupDB('rewards'));
 beforeEach(resetData);
@@ -43,6 +43,7 @@ afterEach(() => {
 async function member(name = 'Asha Verma') {
   const { tokens, user } = await registerUser({ name });
   await db.users.promoteToMember(user.id);
+  await givePennies(user.id);
   return { token: tokens.accessToken, userId: user.id };
 }
 

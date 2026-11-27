@@ -1,6 +1,6 @@
-const { and, eq, ne, inArray, sql } = require('drizzle-orm');
+const { and, eq, ne, inArray, isNull, lt, lte, or, sql } = require('drizzle-orm');
 const { db } = require('./connection');
-const { users: U, userIdentities: I } = require('./schema');
+const { users: U, userIdentities: I, pennyTransactions: T } = require('./schema');
 const { translateDuplicate, pickColumns } = require('./shared');
 const { countryOfPhone } = require('../../utils/phoneCountry');
 
@@ -20,6 +20,9 @@ const TOP_LEVEL = {
   membershipType: 'membershipType',
   membershipTypeSince: 'membershipTypeSince',
   walletCents: 'walletCents',
+  dailyBonusAt: 'dailyBonusAt',
+  creatorConfirmedAt: 'creatorConfirmedAt',
+  collectorNudgedAt: 'collectorNudgedAt',
   failedLoginAttempts: 'failedLoginAttempts',
   lockUntil: 'lockUntil',
   passwordChangedAt: 'passwordChangedAt',
@@ -90,6 +93,9 @@ function toUser(row, identities, { secrets }) {
     membershipType: row.membershipType ?? null,
     membershipTypeSince: row.membershipTypeSince ?? null,
     walletCents: row.walletCents ?? 0,
+    dailyBonusAt: row.dailyBonusAt ?? null,
+    creatorConfirmedAt: row.creatorConfirmedAt ?? null,
+    collectorNudgedAt: row.collectorNudgedAt ?? null,
     passwordChangedAt: row.passwordChangedAt,
     lastLoginAt: row.lastLoginAt,
     deletedAt: row.deletedAt,
@@ -146,7 +152,16 @@ module.exports = {
   async create(fields) {
     const id = await translateDuplicate(() =>
       db().transaction(async (tx) => {
-        const [row] = await tx.insert(U).values(toColumns(fields)).returning({ id: U.id });
+        const [row] = await tx
+          .insert(U)
+          .values(toColumns(fields))
+          .returning({ id: U.id, walletCents: U.walletCents });
+        // The pennies every new user starts with (the column's default), in their history.
+        if (row.walletCents > 0) {
+          await tx
+            .insert(T)
+            .values({ userId: row.id, amount: row.walletCents, reason: 'welcome', balanceAfter: row.walletCents });
+        }
         if (fields.identities?.length) {
           await tx.insert(I).values(fields.identities.map((i) => ({ ...i, userId: row.id })));
         }
@@ -236,6 +251,36 @@ module.exports = {
   /** Records the membership a member chose (or changed to); its first two-month period starts now. */
   async setMembershipType(id, membershipType, now = new Date()) {
     await db().update(U).set({ membershipType, membershipTypeSince: now, updatedAt: now }).where(eq(U.id, id));
+  },
+
+  /**
+   * Collectors to remind that they can start creating too: members as Collectors since `since` or before,
+   * who want product updates and were last reminded before `since` (or never). [{ id, name, email }].
+   */
+  async collectorNudgeCandidates(since, limit = 100) {
+    return db()
+      .select({ id: U.id, name: U.name, email: U.email })
+      .from(U)
+      .where(
+        and(
+          eq(U.status, 'member'),
+          eq(U.membershipType, 'collector'),
+          eq(U.notifyProductUpdates, true),
+          lte(U.membershipTypeSince, since),
+          or(isNull(U.collectorNudgedAt), lt(U.collectorNudgedAt, since)),
+        ),
+      )
+      .limit(limit);
+  },
+
+  /** Marks a Collector reminded now, unless another run did since `since`. Resolves to true when it did. */
+  async claimCollectorNudge(id, since, now = new Date()) {
+    const rows = await db()
+      .update(U)
+      .set({ collectorNudgedAt: now })
+      .where(and(eq(U.id, id), or(isNull(U.collectorNudgedAt), lt(U.collectorNudgedAt, since))))
+      .returning({ id: U.id });
+    return rows.length > 0;
   },
 
   /** Adds `cents` to the member's wallet. Resolves to the new balance. */

@@ -3,6 +3,7 @@ const { alias } = require('drizzle-orm/pg-core');
 const { db } = require('./connection');
 const { nftBids: Bid, nftListings: L, nftSeries: S, payments: P, stoneOrders: O, users: U } = require('./schema');
 const { translateDuplicate } = require('./shared');
+const { spendIn, creditIn, pennyPayment } = require('./pennies');
 
 const toListing = (row) =>
   row && {
@@ -134,6 +135,10 @@ const market = {
       const minCents = top ? minNext(top.amountCents) : row.priceCents;
       if (amountCents < minCents) return { error: 'TOO_LOW', minCents };
       const [bid] = await tx.insert(Bid).values({ listingId, bidderId, amountCents, createdAt: now }).returning();
+      // The bid holds the bidder's pennies (short of them, this throws and the bid is not placed); the
+      // bidder it beats gets theirs back.
+      await spendIn(tx, bidderId, amountCents, 'bid_hold', listingId, now);
+      if (top) await creditIn(tx, top.bidderId, top.amountCents, 'bid_refund', listingId, now);
       return { bid };
     });
   },
@@ -154,7 +159,7 @@ const market = {
    * payment, the listing closed with the fee split, the NFT moved to them). Resolves to
    * { listing, payment, series, winnerId }, or null when it is not due (already settled, withdrawn, no bids).
    */
-  async settleAuction(id, { feePercent, payment }, now = new Date()) {
+  async settleAuction(id, { feePercent }, now = new Date()) {
     return db().transaction(async (tx) => {
       const [row] = await tx
         .select()
@@ -165,17 +170,20 @@ const market = {
       const top = await highestBid(tx, id);
       if (!top) return null;
       const feeCents = Math.round((top.amountCents * feePercent) / 100);
+      // The winner's pennies were held when they bid: the payment records them, the seller gets their share.
       const [paid] = await tx
         .insert(P)
         .values({
           userId: top.bidderId,
           purpose: 'nft_purchase',
           status: 'succeeded',
-          amountCents: top.amountCents,
-          currency: row.currency,
-          ...payment,
+          createdAt: now,
+          ...pennyPayment(top.amountCents),
         })
         .returning();
+      if (top.amountCents - feeCents > 0) {
+        await creditIn(tx, row.sellerId, top.amountCents - feeCents, 'nft_sale', id, now);
+      }
       const [listing] = await tx
         .update(L)
         .set({
@@ -307,7 +315,7 @@ const market = {
    * ended without bids. Resolves to { listing, payment, series }, or null when the listing is no longer
    * open (sold to someone else first, withdrawn, still in its auction, or won by a bidder).
    */
-  async buy(buyerId, id, { feePercent, payment }, now = new Date()) {
+  async buy(buyerId, id, { feePercent }, now = new Date()) {
     return db().transaction(async (tx) => {
       const [row] = await tx
         .select()
@@ -323,11 +331,15 @@ const market = {
           userId: buyerId,
           purpose: 'nft_purchase',
           status: 'succeeded',
-          amountCents: row.priceCents,
-          currency: row.currency,
-          ...payment,
+          createdAt: now,
+          ...pennyPayment(row.priceCents),
         })
         .returning();
+      // Paid in pennies (short of them, this throws and nothing changes hands); the seller gets their share.
+      await spendIn(tx, buyerId, row.priceCents, 'nft_purchase', id, now);
+      if (row.priceCents - feeCents > 0) {
+        await creditIn(tx, row.sellerId, row.priceCents - feeCents, 'nft_sale', id, now);
+      }
       const [listing] = await tx
         .update(L)
         .set({
@@ -374,8 +386,9 @@ const market = {
       return await db().transaction(async (tx) => {
         const [paid] = await tx
           .insert(P)
-          .values({ userId, purpose: 'stone', status: 'succeeded', ...payment })
+          .values({ userId, purpose: 'stone', status: 'succeeded', ...pennyPayment(payment.amountCents) })
           .returning();
+        await spendIn(tx, userId, payment.amountCents, 'stone', paid.id);
         const [order] = await tx
           .insert(O)
           .values({ userId, paymentId: paid.id, package: packageId, ...address })

@@ -2,7 +2,7 @@ const env = require('../src/config/env');
 const db = require('../src/db');
 const { qrng } = require('../src/modules/clue/clue.service');
 const judgeAi = require('../src/modules/clue/judge.ai');
-const { setupDB, resetData, teardownDB, api, registerUser, bearer } = require('./helpers');
+const { setupDB, resetData, teardownDB, api, registerUser, bearer, givePennies } = require('./helpers');
 
 beforeAll(() => setupDB('market'));
 beforeEach(resetData);
@@ -50,6 +50,8 @@ const ADDRESS = {
 async function member(name = 'Asha Verma') {
   const { tokens, user } = await registerUser({ name });
   await db.users.promoteToMember(user.id);
+  // Enough pennies for the conversions, the package and the NFTs these tests buy.
+  await givePennies(user.id);
   return { token: tokens.accessToken, userId: user.id };
 }
 
@@ -93,7 +95,7 @@ describe('conversion and active membership', () => {
     expect(options.map((o) => o.label)).toEqual(['Single', 'Twin', 'Triple', 'Hexa', 'Dozen', 'Double Dozen']);
     const triple = await complete(token, 3);
     expect(triple).toMatchObject({ label: 'Triple', convertedAt: null, acquired: false, listing: null });
-    expect(triple.conversionPrice).toEqual({ amountCents: 9000, currency: env.PAYMENTS_CURRENCY });
+    expect(triple.conversionPrice).toEqual({ amountCents: 9000, currency: 'PNY' });
   });
 
   test('converting charges the conversion price once and makes the emblem an NFT', async () => {
@@ -102,7 +104,9 @@ describe('conversion and active membership', () => {
     const [a, b] = await Promise.all([convert(token, six.id, { poc: true }), convert(token, six.id)]);
     expect([a.status, b.status].sort()).toEqual([201, 409]);
     const ok = a.status === 201 ? a : b;
-    expect(ok.body.data.payment).toMatchObject({ purpose: 'conversion', amountCents: 18000, provider: 'demo' });
+    // Paid in pennies.
+    expect(ok.body.data.payment).toMatchObject({ purpose: 'conversion', amountCents: 18000, provider: 'pennies', currency: 'PNY' });
+    expect((await db.users.findById(userId)).walletCents).toBe(1000 + 1_000_000 - 6 * env.PENNY_READING_PRICE - 18000);
     expect(ok.body.data.series.convertedAt).toEqual(expect.any(String));
     expect((await db.payments.list(userId)).filter((p) => p.purpose === 'conversion')).toHaveLength(1);
   });
@@ -144,7 +148,7 @@ describe('conversion and active membership', () => {
     expect((await membershipService.activeStatus(user, later)).isActive).toBe(false);
   });
 
-  test('the Sensitisation Package is the one package on sale, in euros', async () => {
+  test('the Sensitisation Package is the one package on sale, in pennies', async () => {
     const { token } = await member();
     const { packages } = await membership(token);
     expect(packages).toHaveLength(1);
@@ -153,13 +157,13 @@ describe('conversion and active membership', () => {
       title: 'Sensitisation Package',
       subtitle: 'Initiation into the Papolona Method',
       totalCents: env.PACKAGE_STONE_TRIPTYCH_CENTS + env.STONE_POSTAGE_CENTS,
-      currency: env.PACKAGE_CURRENCY,
+      currency: 'PNY',
     });
     expect(packages[0].includes).toHaveLength(4);
     // The old retreat package is no longer sold: the retreat is by application.
     expect((await orderStone(token, { ...ADDRESS, package: 'retreat' })).status).toBe(400);
     const ordered = await orderStone(token);
-    expect(ordered.body.data.payment).toMatchObject({ currency: env.PACKAGE_CURRENCY });
+    expect(ordered.body.data.payment).toMatchObject({ currency: 'PNY', provider: 'pennies' });
   });
 
   test('members apply for the retreat once, without paying', async () => {
@@ -226,15 +230,13 @@ describe('billing info', () => {
     expect((await getBilling(token)).billing.city).toBe('Mumbai');
   });
 
-  test('each payment keeps the billing info it was paid with', async () => {
+  test('a penny pack (the one real-money payment) keeps the billing info it was paid with', async () => {
     const { token, userId } = await member();
     await putBilling(token, BILLING);
-    const triple = await complete(token, 3);
-    expect((await convert(token, triple.id)).status).toBe(201);
-    await orderStone(token);
-    const paid = await db.payments.list(userId);
-    expect(paid.map((p) => p.purpose).sort()).toEqual(['conversion', 'stone']);
-    for (const p of paid) expect(p.billing).toMatchObject({ fullName: 'Asha Verma', city: 'Pune' });
+    expect((await api().post('/api/v1/pennies/packs').set(bearer(token)).send({ packId: 'pack_1000' })).status).toBe(201);
+    const [paid] = await db.payments.list(userId);
+    expect(paid).toMatchObject({ purpose: 'penny_pack', currency: env.PENNY_PACK_CURRENCY, provider: 'demo' });
+    expect(paid.billing).toMatchObject({ fullName: 'Asha Verma', city: 'Pune' });
   });
 });
 
@@ -309,8 +311,18 @@ describe('marketplace', () => {
     expect(market.feePercent).toBe(50);
 
     expect((await buy(seller.token, listing.id)).body.error.code).toBe('OWN_LISTING');
+    // Paid in pennies: the 1,000 a new user has are not enough, and nothing changes hands.
+    const short = await buy(token, listing.id);
+    expect(short.status).toBe(402);
+    expect(short.body.error.code).toBe('NOT_ENOUGH_PENNIES');
+    expect((await db.market.findOffer(listing.id)).status).toBe('active');
+    await givePennies(apprentice.user.id, 20000);
+    const sellerBefore = (await db.users.findById(seller.userId)).walletCents;
     const bought = await buy(token, listing.id);
     expect(bought.status).toBe(201);
+    // The buyer paid 20,000 pennies; the seller's half went into their wallet.
+    expect((await db.users.findById(apprentice.user.id)).walletCents).toBe(1000);
+    expect((await db.users.findById(seller.userId)).walletCents).toBe(sellerBefore + 10000);
     expect(bought.body.data.payment).toMatchObject({ purpose: 'nft_purchase', amountCents: 20000 });
     expect(bought.body.data.series).toMatchObject({ id: seller.nft.id, acquired: true, listing: null });
     // Its last sale travels with it, with who sold and who bought.
@@ -385,13 +397,13 @@ describe('marketplace', () => {
     expect((await buy(other.token, listing.id)).body.error.code).toBe('LISTING_CLOSED');
   });
 
-  test('buying is refused while demo payments are off', async () => {
+  test('buying is paid in pennies, whether or not real payments are set up', async () => {
     const seller = await activeSeller();
     const listing = (await list(seller.token, seller.nft.id, 9000)).body.data.listing;
     await db.testing.endAuction(listing.id);
     env.DEMO_PAYMENTS = false;
     const buyer = await member('Buyer');
-    expect((await buy(buyer.token, listing.id)).status).toBe(503);
+    expect((await buy(buyer.token, listing.id)).status).toBe(201);
   });
 });
 
@@ -401,7 +413,7 @@ describe('reference numbers', () => {
     const first = await complete(m.token, 3);
     // A member without a membership type is coded ME.
     expect(first.reference).toMatch(/^ME1-\d{5}$/);
-    await db.users.update(m.userId, { membershipType: 'creator' });
+    await db.users.update(m.userId, { membershipType: 'creator', creatorConfirmedAt: new Date() });
     const second = await complete(m.token, 6);
     expect(second.reference).toMatch(/^CR2-\d{5}$/);
     const n = (ref) => Number(ref.split('-')[1]);
@@ -422,6 +434,7 @@ describe('Collectors’ auction', () => {
   async function collector(name) {
     const { tokens, user } = await registerUser({ name });
     await db.users.promoteToMember(user.id, new Date(), 'collector');
+    await givePennies(user.id, 100000);
     return { token: tokens.accessToken, userId: user.id };
   }
 
@@ -471,7 +484,11 @@ describe('Collectors’ auction', () => {
     // The highest bidder cannot outbid themselves; the next bid must be 5% higher.
     expect((await bid(a.token, listing.id, 20000)).body.error.code).toBe('ALREADY_HIGHEST');
     expect((await bid(b.token, listing.id, 10400)).body.error).toMatchObject({ details: { minBidCents: 10500 } });
+    // A bid holds the bidder's pennies; outbid, they are given back.
+    expect((await db.users.findById(a.userId)).walletCents).toBe(101000 - 10000);
     expect((await bid(b.token, listing.id, 15000)).status).toBe(201);
+    expect((await db.users.findById(a.userId)).walletCents).toBe(101000);
+    expect((await db.users.findById(b.userId)).walletCents).toBe(101000 - 15000);
     expect((await getListing(a.token, listing.id)).auction).toMatchObject({ highestBidMine: false, canBid: true });
     // The seller sees who leads; with bids it can no longer be withdrawn.
     expect((await getListing(seller.token, listing.id)).auction).toMatchObject({
@@ -495,6 +512,8 @@ describe('Collectors’ auction', () => {
     });
     const purchases = await db.payments.list(b.userId);
     expect(purchases.filter((p) => p.purpose === 'nft_purchase').map((p) => p.amountCents)).toEqual([15000]);
+    // The held bid paid for it: nothing more taken from the winner; the seller got their half.
+    expect((await db.users.findById(b.userId)).walletCents).toBe(101000 - 15000);
     expect((await db.payments.list(a.userId)).filter((p) => p.purpose === 'nft_purchase')).toEqual([]);
     const won = (await api().get('/api/v1/series').set(bearer(b.token))).body.data.series;
     expect(won.map((s) => s.id)).toEqual([seller.nft.id]);
@@ -523,6 +542,7 @@ describe('Collectors’ auction', () => {
     const { dispatchDue } = require('../src/modules/reminders/reminders.service');
     expect((await dispatchDue()).auctions).toBe(0);
     const anyone = await registerUser({ name: 'Grace Hopper' });
+    await givePennies(anyone.user.id, 9000);
     const open = await getListing(anyone.tokens.accessToken, listing.id);
     expect(open).toMatchObject({ status: 'active', priceCents: 9000 });
     expect(open.auction).toMatchObject({ phase: 'open', canBuy: true, canBid: false });
@@ -540,6 +560,62 @@ describe('Collectors’ auction', () => {
     const [x, y] = await Promise.all([bid(a.token, listing.id, 9000), bid(b.token, listing.id, 9000)]);
     expect([x.status, y.status].sort()).toEqual([201, 400]);
     expect((await getListing(a.token, listing.id)).auction.bidCount).toBe(1);
+    // Only the bid taken holds pennies.
+    const wallets = [(await db.users.findById(a.userId)).walletCents, (await db.users.findById(b.userId)).walletCents];
+    expect(wallets.sort()).toEqual([101000 - 9000, 101000].sort());
+  });
+
+  test('a bid needs the pennies it holds', async () => {
+    const seller = await activeSeller();
+    const listing = (await list(seller.token, seller.nft.id, 9000)).body.data.listing;
+    const { tokens, user } = await registerUser({ name: 'Poor Collector' });
+    await db.users.promoteToMember(user.id, new Date(), 'collector');
+    const res = await bid(tokens.accessToken, listing.id, 9000);
+    expect(res.status).toBe(402);
+    expect((await getListing(tokens.accessToken, listing.id)).auction.bidCount).toBe(0);
+  });
+});
+
+describe('provisional Creators', () => {
+  async function provisional(name = 'Pia Provisional') {
+    const { tokens, user } = await registerUser({ name });
+    await db.users.promoteToMember(user.id, new Date(), 'creator');
+    return { token: tokens.accessToken, userId: user.id };
+  }
+
+  test('Single, Twin and Level 1 only, until their first Level 1 conversion makes them full', async () => {
+    const p = await provisional();
+    expect((await api().post('/api/v1/series').set(bearer(p.token)).send({ length: 6 })).body.error.code).toBe('LEVEL_NOT_ALLOWED');
+    const triple = await complete(p.token, 3);
+    // The conversion and the first month's fee, in pennies: 1,000 is not enough.
+    const short = await convert(p.token, triple.id);
+    expect(short.status).toBe(402);
+    expect((await membership(p.token)).creatorStage).toBe('provisional');
+
+    await givePennies(p.userId, 9000 + env.MEMBERSHIP_CREATOR_CENTS);
+    const before = (await db.users.findById(p.userId)).walletCents;
+    const converted = await convert(p.token, triple.id);
+    expect(converted.status).toBe(201);
+    expect(converted.body.data.creatorConfirmed).toBe(true);
+    expect((await db.users.findById(p.userId)).walletCents).toBe(before - 9000 - env.MEMBERSHIP_CREATOR_CENTS);
+    const status = await membership(p.token);
+    expect(status).toMatchObject({
+      creatorStage: 'full',
+      allowedSeriesLengths: [1, 2, 3, 6, 12, 24],
+      standing: { required: true, met: true },
+    });
+    const purposes = (await db.payments.list(p.userId)).map((x) => x.purpose).sort();
+    expect(purposes).toEqual(['conversion', 'membership']);
+  });
+
+  test('a provisional Creator converts a Level 1 series first', async () => {
+    const p = await provisional();
+    await givePennies(p.userId);
+    // A Hexa made earlier (as a Collector, say).
+    await db.users.update(p.userId, { membershipType: 'collector' });
+    const hexa = await complete(p.token, 6);
+    await db.users.update(p.userId, { membershipType: 'creator' });
+    expect((await convert(p.token, hexa.id)).body.error.code).toBe('LEVEL_ONE_FIRST');
   });
 });
 

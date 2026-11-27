@@ -183,6 +183,13 @@
       "when": 1795778181797,
       "tag": "0025_series_references",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1795779861542,
+      "tag": "0026_pennies",
+      "breakpoints": true
     }
   ]
 }

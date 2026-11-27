@@ -1,5 +1,7 @@
 const db = require('../../db');
 const ApiError = require('../../utils/ApiError');
+const env = require('../../config/env');
+const pennies = require('../pennies/pennies.service');
 const { publicName } = require('../artwork/artwork.service');
 
 /**
@@ -116,9 +118,13 @@ async function request(user, { userId, text }) {
       throw new ApiError(409, 'REQUEST_INCOMING', 'They have sent you a request: accept it to talk.', details);
     }
   }
-  const created = await db.dms.createRequest(user.id, userId, text);
-  // Another request between the two arrived first.
-  if (!created) throw ApiError.conflict('REQUEST_PENDING', 'A request between you is already waiting.');
+  // A message request costs a few pennies (the messages after it are free).
+  const created = await pennies.chargeFor(user.id, env.PENNY_MESSAGE_REQUEST_PRICE, 'message_request', async () => {
+    const made = await db.dms.createRequest(user.id, userId, text);
+    // Another request between the two arrived first: given back.
+    if (!made) throw ApiError.conflict('REQUEST_PENDING', 'A request between you is already waiting.');
+    return made;
+  });
   return { thread: toPublicThread(await ownThread(user, created.thread.id), user.id) };
 }
 

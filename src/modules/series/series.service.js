@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const env = require('../../config/env');
 const db = require('../../db');
-const billingService = require('../billing/billing.service');
 const { DuplicateError } = require('../../db/errors');
 const ApiError = require('../../utils/ApiError');
 const standing = require('../membership/standing');
@@ -34,18 +33,24 @@ const OPTIONS = [
   { length: 12, label: 'Dozen', rows: 4, cols: 3, rarity: 'mythic', badge: null, nftEligible: true },
   { length: 24, label: 'Double Dozen', rows: 8, cols: 3, rarity: 'legendary', badge: null, nftEligible: true },
 ];
-// What converting each level's set of emblems into an NFT costs (the client's provisional prices). Prices
-// are set per level, as a class, so they change together; the same values are the recommended minimum
-// resale prices for now.
+// What converting each level's set of emblems into an NFT costs, in Papolona pennies (the client's
+// provisional prices). Prices are set per level, as a class, so they change together; the same values are
+// the recommended minimum resale prices for now.
+const PENNIES = 'PNY';
 const CONVERSION_PRICE_CENTS = { 3: 9000, 6: 18000, 12: 54000, 24: 216000 };
 const conversionPrice = (length) =>
-  CONVERSION_PRICE_CENTS[length] ? { amountCents: CONVERSION_PRICE_CENTS[length], currency: env.PAYMENTS_CURRENCY } : null;
+  CONVERSION_PRICE_CENTS[length] ? { amountCents: CONVERSION_PRICE_CENTS[length], currency: PENNIES } : null;
 const LENGTHS = OPTIONS.map((o) => o.length);
 // Explorers may read singles, twins and Level 1 (3) only; Creators and Collectors any length.
 const EXPLORER_LENGTHS = [1, 2, 3];
 const isExplorer = (user) => user.membershipType === 'explorer';
+/**
+ * A Creator who has not converted their first Level 1 series yet: they read like an Explorer (singles,
+ * twins, Level 1) and become a full Creator with that first conversion (see convert).
+ */
+const isProvisionalCreator = (user) => user.membershipType === 'creator' && !user.creatorConfirmedAt;
 /** The series lengths this member may start. */
-const allowedLengths = (user) => (isExplorer(user) ? EXPLORER_LENGTHS : LENGTHS);
+const allowedLengths = (user) => (isExplorer(user) || isProvisionalCreator(user) ? EXPLORER_LENGTHS : LENGTHS);
 const optionFor = (length) => OPTIONS.find((o) => o.length === length);
 
 // The demo butterfly artworks bundled in the app (assets/collection/butterflies), for every series.
@@ -181,7 +186,7 @@ function options() {
  * zero, for app builds that still show it; demoPayments says whether demo payments are on.
  */
 const publishInfo = () => ({
-  price: { amountCents: 0, currency: env.PAYMENTS_CURRENCY },
+  price: { amountCents: 0, currency: PENNIES },
   free: true,
   demoPayments: env.DEMO_PAYMENTS,
 });
@@ -219,7 +224,9 @@ async function start(signedIn, { length }, now = new Date()) {
   if (!allowedLengths(user).includes(length)) {
     throw ApiError.forbidden(
       'LEVEL_NOT_ALLOWED',
-      'Explorers can read singles, twins and Level 1 series. Upgrade to Creator or Collector for the other levels.',
+      isProvisionalCreator(user)
+        ? 'Convert your first Level 1 series into an NFT to become a full Creator and open every level.'
+        : 'Explorers can read singles, twins and Level 1 series. Upgrade to Creator or Collector for the other levels.',
     );
   }
 
@@ -350,6 +357,12 @@ async function convertible(signedIn, id) {
   }
   const series = await ownSeries(user.id, id);
   if (series.status !== 'completed') throw ApiError.conflict('SERIES_NOT_COMPLETED', 'Complete the series first.');
+  if (isProvisionalCreator(user) && series.length !== 3 && !series.convertedAt) {
+    throw ApiError.forbidden(
+      'LEVEL_ONE_FIRST',
+      'As a provisional Creator, convert a Level 1 series first: it makes you a full Creator.',
+    );
+  }
   if (!optionFor(series.length)?.nftEligible) {
     throw ApiError.forbidden('NOT_MINT_ELIGIBLE', 'Only Triple, Hexa, Dozen and Double Dozen series can be converted into NFTs.');
   }
@@ -357,29 +370,34 @@ async function convertible(signedIn, id) {
 }
 
 /**
- * Converts a completed emblem series into an NFT for its conversion price (demo payments only for now),
- * with or without joining the POC ecosystem. Keeps the member active (see membership). Resolves to
- * { series, payment }.
+ * Converts a completed emblem series into an NFT for its conversion price in pennies, with or without
+ * joining the POC ecosystem. Keeps the member active (see membership). A provisional Creator's first
+ * Level 1 conversion also makes them a full Creator, paying their first month (MEMBERSHIP_CREATOR_CENTS
+ * pennies) with it. 402 NOT_ENOUGH_PENNIES when short. Resolves to { series, payment, creatorConfirmed }.
  */
-async function convert(user, id, { poc = false } = {}, now = new Date()) {
-  const series = await convertible(user, id);
+async function convert(signedIn, id, { poc = false } = {}, now = new Date()) {
+  const series = await convertible(signedIn, id);
   if (series.convertedAt) throw ApiError.conflict('ALREADY_CONVERTED', 'This emblem is already an NFT.');
-  if (!env.DEMO_PAYMENTS) throw new ApiError(503, 'PAYMENTS_UNAVAILABLE', 'Payments are not available yet.');
+  const user = (await db.users.findById(signedIn.id)) ?? signedIn;
+  const confirmCreator = isProvisionalCreator(user) && series.length === 3;
   const result = await db.series.convert(
     user.id,
     id,
     poc ? 'mint_poc' : 'mint',
     {
-      ...conversionPrice(series.length),
-      provider: 'demo',
-      providerRef: `demo_${crypto.randomUUID()}`,
-      billing: await billingService.snapshot(user.id),
+      price: conversionPrice(series.length).amountCents,
+      confirmCreator,
+      membershipFee: confirmCreator ? env.MEMBERSHIP_CREATOR_CENTS : 0,
     },
     now,
   );
   // A second request converted it first: nothing was charged twice.
   if (!result) throw ApiError.conflict('ALREADY_CONVERTED', 'This emblem is already an NFT.');
-  return { series: await withBadgesOne(result.series), payment: toPayment(result.payment) };
+  return {
+    series: await withBadgesOne(result.series),
+    payment: toPayment(result.payment),
+    creatorConfirmed: confirmCreator,
+  };
 }
 
 /**
@@ -397,6 +415,7 @@ module.exports = {
   OPTIONS,
   allowedLengths,
   isExplorer,
+  isProvisionalCreator,
   ARTWORK_KEYS,
   NO_ARTWORK,
   EMBLEM_LENGTHS,

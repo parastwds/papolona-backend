@@ -77,8 +77,16 @@ const users = pgTable(
     membershipType: text('membership_type'),
     // When the current membership type was chosen: its first two-month period starts here.
     membershipTypeSince: at('membership_type_since'),
-    // The member's wallet balance (demo payments only for now), in MEMBERSHIP_CURRENCY cents.
-    walletCents: integer('wallet_cents').notNull().default(0),
+    // The user's balance in Papolona pennies (see pennies.service): every new user starts with 1,000.
+    // Everything in the app is paid in pennies; pennies are the one thing bought with real money.
+    walletCents: integer('wallet_cents').notNull().default(1000),
+    // When the user last claimed the daily penny bonus (one a UTC day).
+    dailyBonusAt: at('daily_bonus_at'),
+    // When a Creator became a full Creator: their first Level 1 conversion. Null while provisional (and for
+    // anyone who never was a Creator); kept after switching away, so returning Creators are full at once.
+    creatorConfirmedAt: at('creator_confirmed_at'),
+    // When a Collector was last emailed that they can start creating too.
+    collectorNudgedAt: at('collector_nudged_at'),
     // The end of the active window the user was last emailed a "convert an NFT to stay active" nudge for.
     activeReminderFor: at('active_reminder_for'),
     failedLoginAttempts: integer('failed_login_attempts').notNull().default(0),
@@ -94,6 +102,7 @@ const users = pgTable(
     check('users_status_check', oneOf(t.status, USER_STATUSES)),
     check('users_membership_type_check', sql`${t.membershipType} is null or ${oneOf(t.membershipType, MEMBERSHIP_TYPES)}`),
     check('users_name_length', sql`char_length(${t.name}) <= 80`),
+    check('users_wallet_nonnegative', sql`${t.walletCents} >= 0`),
     check('users_bio_length', sql`char_length(${t.profileBio}) <= 500`),
     index('users_status_idx').on(t.status),
     index('users_cohort_idx').on(t.cohort),
@@ -372,8 +381,20 @@ const userBadges = pgTable(
 // membership: the old one-time fee (membership is free now); publish: adding a series to the collective artwork.
 // wallet_deposit: money put into the member's (demo) wallet; collector_fee: the Collector's two-monthly fee;
 // donation: a gift to Papolona from any user.
-const PAYMENT_PURPOSES = ['membership', 'publish', 'conversion', 'nft_purchase', 'stone', 'wallet_deposit', 'collector_fee', 'donation'];
-const PAYMENT_PROVIDERS = ['demo'];
+// penny_pack: Papolona pennies bought with real money, the only real-money payment; the others are paid in
+// pennies (provider 'pennies', currency PNY, amountCents in pennies) and kept here for standing and receipts.
+const PAYMENT_PURPOSES = [
+  'membership',
+  'publish',
+  'conversion',
+  'nft_purchase',
+  'stone',
+  'wallet_deposit',
+  'collector_fee',
+  'donation',
+  'penny_pack',
+];
+const PAYMENT_PROVIDERS = ['demo', 'pennies'];
 const PAYMENT_STATUSES = ['succeeded', 'failed', 'refunded'];
 
 // Money the user paid. Only the demo provider exists
@@ -663,7 +684,48 @@ const profileAccess = pgTable(
   ],
 );
 
+// Every change to a user's penny balance, signed (+ earned, − spent), with the balance after it.
+const PENNY_REASONS = [
+  'welcome',
+  'daily_bonus',
+  'pack',
+  'reading',
+  'clue_prompt',
+  'message_request',
+  'conversion',
+  'membership',
+  'collector_fee',
+  'stone',
+  'donation',
+  'nft_purchase',
+  'bid_hold',
+  'bid_refund',
+  'nft_sale',
+  'refund',
+  'migration',
+];
+const pennyTransactions = pgTable(
+  'penny_transactions',
+  {
+    id: id(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    amount: integer('amount').notNull(),
+    reason: text('reason').notNull(),
+    // What it was for (a draw, a listing, a series, a payment…), when there is one.
+    refId: uuid('ref_id'),
+    balanceAfter: integer('balance_after').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check('penny_transactions_reason_check', oneOf(t.reason, PENNY_REASONS)),
+    check('penny_transactions_amount_check', sql`${t.amount} <> 0`),
+    index('penny_transactions_user_idx').on(t.userId, t.createdAt),
+  ],
+);
+
 module.exports = {
+  pennyTransactions,
+  PENNY_REASONS,
   questionnaires,
   users,
   userIdentities,

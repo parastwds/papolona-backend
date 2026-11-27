@@ -11,6 +11,7 @@ const { clueDraws, journal, journalInsights } = require('./journal');
 const { stats } = require('./stats');
 const { reminders, readingReminderCandidates, claimReadingReminder } = require('./reminders');
 const { payments } = require('./payments');
+const { pennies } = require('./pennies');
 const { series } = require('./series');
 const { badges } = require('./badges');
 const { community } = require('./community');
@@ -76,6 +77,7 @@ module.exports = {
   reminders,
   readingReminders: { candidates: readingReminderCandidates, claim: claimReadingReminder },
   payments,
+  pennies,
   series,
   badges,
   community,

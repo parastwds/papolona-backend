@@ -72,7 +72,7 @@ describe('NFT series', () => {
       [12, 4, 3, 'mythic', null, true],
       [24, 8, 3, 'legendary', null, true],
     ]);
-    expect(res.body.data.publish).toMatchObject({ free: true, price: { amountCents: 0, currency: env.PAYMENTS_CURRENCY } });
+    expect(res.body.data.publish).toMatchObject({ free: true, price: { amountCents: 0, currency: 'PNY' } });
   });
 
   test('explorers: singles, twins and Level 1 only, and no converting', async () => {

@@ -1,7 +1,5 @@
-const crypto = require('crypto');
 const env = require('../../config/env');
 const db = require('../../db');
-const billingService = require('../billing/billing.service');
 const ApiError = require('../../utils/ApiError');
 const logger = require('../../utils/logger');
 const { sendMail } = require('../../utils/mailer');
@@ -14,17 +12,21 @@ const standing = require('./standing');
  * - Apprentice ('probation'): at least PROBATION_DAYS from sign-up, and at least PROBATION_READINGS passed
  *   readings in a multiple of PROBATION_STEP (see users.getProbation).
  * - Member: once the apprenticeship is complete the user joins the collective and chooses a membership
- *   (MEMBERSHIP_TYPES: Explorer, Creator or Collector), which unlocks series. Members keep their emblems in
- *   their gallery and can buy on the marketplace. The membership is separate from the questionnaire's
- *   cohort, which only suggests one.
+ *   (MEMBERSHIP_TYPES: Explorer, Creator or Collector), which unlocks series. Explorer and Collector start
+ *   at once. Creator starts provisional: they read like an Explorer until their first Level 1 conversion
+ *   makes them a full Creator (and starts their monthly fee); a member who was a full Creator before is
+ *   full again at once. Members keep their emblems in their gallery and can buy on the marketplace. The
+ *   membership is separate from the questionnaire's cohort, which only suggests one.
  * - Active member: a member who has bought the Sensitisation Package and paid to convert an emblem into an
  *   NFT within the last ACTIVE_WINDOW_DAYS. Each conversion opens a new window; there is no upper limit.
  *   Only active members can sell their NFTs on the marketplace. A member whose window closes is no longer
  *   active until they convert again; they keep everything else.
- * All payments are demo payments for now.
+ * Everything is paid in Papolona pennies (see pennies.service).
  */
 
 const DAY = 24 * 60 * 60 * 1000;
+// Prices are in Papolona pennies; the *_CENTS settings are pennies (1 penny = 1 cent).
+const PENNIES = 'PNY';
 const windowMs = () => env.ACTIVE_WINDOW_DAYS * DAY;
 
 /**
@@ -55,7 +57,7 @@ const packagePrice = (pkg) => {
     priceCents,
     postageCents: env.STONE_POSTAGE_CENTS,
     totalCents: priceCents + env.STONE_POSTAGE_CENTS,
-    currency: env.PACKAGE_CURRENCY,
+    currency: PENNIES,
   };
 };
 const findPackage = (id) => PACKAGES.find((p) => p.id === id);
@@ -103,8 +105,9 @@ const MEMBERSHIP_TYPES = [
     title: 'Creator',
     tagline: 'For artists, writers and entrepreneurs',
     benefits: [
-      'Unlimited readings at every level, 1 to 4',
-      'Convert completed series into certified NFTs and sell them',
+      'Start as a provisional Creator: Single, Twin and Level 1 readings',
+      'Convert your first Level 1 series into an NFT to become a full Creator',
+      'Then every level, 1 to 4, and sell your NFTs',
       'Convert at least one series every two months',
       'Papolona acts as your agent: sales revenue shared 50/50',
     ],
@@ -128,24 +131,26 @@ const MEMBERSHIP_TYPES = [
 const MEMBERSHIP_TYPE_IDS = MEMBERSHIP_TYPES.map((t) => t.id);
 const findType = (id) => MEMBERSHIP_TYPES.find((t) => t.id === id);
 const listTypes = () =>
-  MEMBERSHIP_TYPES.map(({ priceCents, ...t }) => ({ ...t, priceCents: priceCents(), currency: env.MEMBERSHIP_CURRENCY }));
+  MEMBERSHIP_TYPES.map(({ priceCents, ...t }) => ({ ...t, priceCents: priceCents(), currency: PENNIES }));
 
 // The membership the questionnaire's cohort suggests; patrons commission and buy work, like collectors.
 const SUGGESTED_BY_COHORT = { creator: 'creator', collector: 'collector', patron: 'collector', explorer: 'explorer' };
 const suggestedType = (user) => SUGGESTED_BY_COHORT[user.cohort] ?? 'explorer';
 
-/** Charges the first month of a paid membership (demo payments only for now). Free ones charge nothing. */
+/**
+ * Charges the first month of a paid membership in pennies (402 NOT_ENOUGH_PENNIES when short). Free ones,
+ * and a provisional Creator (who pays with their first conversion), charge nothing.
+ */
 async function chargeMembership(user, type) {
-  const amountCents = type.priceCents();
-  if (amountCents === 0) return null;
-  return db.payments.record(user.id, 'membership', {
-    amountCents,
-    currency: env.MEMBERSHIP_CURRENCY,
-    provider: 'demo',
-    providerRef: `demo_${crypto.randomUUID()}`,
-    billing: await billingService.snapshot(user.id),
-  });
+  const amount = type.priceCents();
+  if (amount === 0) return null;
+  if (type.id === 'creator' && !user.creatorConfirmedAt) return null;
+  return (await db.pennies.pay(user.id, 'membership', amount, 'membership')).payment;
 }
+
+/** Where a Creator stands: 'provisional' until their first Level 1 conversion, then 'full'; null otherwise. */
+const creatorStage = (user) =>
+  user.status === 'member' && user.membershipType === 'creator' ? (user.creatorConfirmedAt ? 'full' : 'provisional') : null;
 
 const toPayment = (p) => ({
   id: p.id,
@@ -202,11 +207,15 @@ async function getStatus(signedIn, now = new Date()) {
     allowedSeriesLengths: isMember ? series.allowedLengths(user) : [],
     // Explorers cannot convert or sell.
     canProfit: isMember && !series.isExplorer(user),
+    // 'provisional' until a Creator's first Level 1 conversion, then 'full'; null for other memberships.
+    creatorStage: creatorStage(user),
+    // Collectors are reminded now and then that they can start creating too (Home shows a card).
+    creatorInvite: isMember && user.membershipType === 'collector',
     // What a Creator or Collector must do each period to keep their membership, and by when.
     standing: terms,
     // Set once, when this call moved the member back to Explorer: the membership they lost.
     demotedFrom,
-    wallet: { balanceCents: user.walletCents ?? 0, currency: env.MEMBERSHIP_CURRENCY },
+    wallet: { balanceCents: user.walletCents ?? 0, currency: PENNIES },
     suggestedType: suggestedType(user),
     probation,
     free: true,
@@ -238,8 +247,13 @@ async function join(user, typeId) {
       `Membership opens after the apprenticeship: ${probation.daysRequired} days and ${probation.readingsRequired} or more passed readings in a multiple of ${probation.readingsStep}. So far: day ${probation.daysDone}, ${probation.readingsDone} readings passed.`,
     );
   }
-  if (type.priceCents() > 0 && !env.DEMO_PAYMENTS) {
-    throw new ApiError(503, 'PAYMENTS_UNAVAILABLE', 'Payments are not available yet.');
+  // Short of pennies for a paid membership: refused before anything changes.
+  const fee = type.id === 'creator' && !user.creatorConfirmedAt ? 0 : type.priceCents();
+  if (fee > (user.walletCents ?? 0)) {
+    throw new ApiError(402, 'NOT_ENOUGH_PENNIES', `This membership needs ${fee.toLocaleString('en-US')} pennies.`, {
+      needed: fee,
+      balance: user.walletCents ?? 0,
+    });
   }
   // False when another request promoted the user first (a double tap): nothing is charged.
   if (!(await db.users.promoteToMember(user.id, new Date(), type.id))) {
@@ -252,8 +266,9 @@ async function join(user, typeId) {
 
 /**
  * Switches a member's membership, at any time. Each switch to a paid membership charges its first month
- * again, even if the member had it before; Collector is free. Members only. Resolves to
- * { membership, payment }.
+ * again in pennies, even if the member had it before; Collector is free. Switching to Creator starts
+ * provisional (free until the first Level 1 conversion) unless the member was a full Creator before.
+ * Members only. Resolves to { membership, payment }.
  */
 async function chooseType(user, typeId) {
   const type = findType(typeId);
@@ -264,9 +279,6 @@ async function chooseType(user, typeId) {
   if (user.membershipType === type.id) {
     throw ApiError.conflict('SAME_MEMBERSHIP', `This is already your membership.`);
   }
-  if (type.priceCents() > 0 && !env.DEMO_PAYMENTS) {
-    throw new ApiError(503, 'PAYMENTS_UNAVAILABLE', 'Payments are not available yet.');
-  }
   const payment = await chargeMembership(user, type);
   await db.users.setMembershipType(user.id, type.id);
   const updated = await db.users.findById(user.id);
@@ -274,8 +286,9 @@ async function chooseType(user, typeId) {
 }
 
 /**
- * Orders a package (PACKAGES), shipped to `address`, for its price plus postage (demo payments only for
- * now). Members only, one package per member. Resolves to { order, payment, membership }.
+ * Orders a package (PACKAGES), shipped to `address`, for its price plus postage, in pennies (402
+ * NOT_ENOUGH_PENNIES when short). Members only, one package per member. Resolves to
+ * { order, payment, membership }.
  */
 async function orderStone(user, address, packageId = PACKAGES[0].id) {
   const pkg = findPackage(packageId);
@@ -283,18 +296,11 @@ async function orderStone(user, address, packageId = PACKAGES[0].id) {
   if (user.status !== 'member') {
     throw ApiError.forbidden('MEMBERSHIP_REQUIRED', 'Join the collective before ordering your package.');
   }
-  if (!env.DEMO_PAYMENTS) throw new ApiError(503, 'PAYMENTS_UNAVAILABLE', 'Payments are not available yet.');
   if (await db.market.findStoneOrder(user.id)) {
     throw ApiError.conflict('STONE_ALREADY_ORDERED', 'You have already ordered your package.');
   }
-  const { totalCents, currency } = packagePrice(pkg);
-  const result = await db.market.orderStone(user.id, pkg.id, address, {
-    amountCents: totalCents,
-    currency,
-    provider: 'demo',
-    providerRef: `demo_${crypto.randomUUID()}`,
-    billing: await billingService.snapshot(user.id),
-  });
+  const { totalCents } = packagePrice(pkg);
+  const result = await db.market.orderStone(user.id, pkg.id, address, { amountCents: totalCents });
   // A second request ordered first: nothing was charged twice.
   if (!result) throw ApiError.conflict('STONE_ALREADY_ORDERED', 'You have already ordered your package.');
   return { order: result.order, payment: toPayment(result.payment), membership: await getStatus(user) };
@@ -345,43 +351,12 @@ async function applyForRetreat(user, motivation) {
   return { application, membership: await getStatus(user) };
 }
 
-const MIN_DEPOSIT_CENTS = 100;
-const MAX_DEPOSIT_CENTS = 10000000;
-
-/** Records a demo payment for `purpose`. */
-async function demoPayment(user, purpose, amountCents) {
-  if (!env.DEMO_PAYMENTS) throw new ApiError(503, 'PAYMENTS_UNAVAILABLE', 'Payments are not available yet.');
-  return db.payments.record(user.id, purpose, {
-    amountCents,
-    currency: env.MEMBERSHIP_CURRENCY,
-    provider: 'demo',
-    providerRef: `demo_${crypto.randomUUID()}`,
-    billing: await billingService.snapshot(user.id),
-  });
-}
-
-/**
- * Puts money into the member's wallet (demo payments only for now): a Collector keeps a minimum balance,
- * a Creator deposits at the start of each period. Members only. Resolves to { membership, payment }.
- */
-async function depositToWallet(user, amountCents) {
-  if (user.status !== 'member') {
-    throw ApiError.forbidden('MEMBERSHIP_REQUIRED', 'Join the collective before using a wallet.');
-  }
-  if (!Number.isInteger(amountCents) || amountCents < MIN_DEPOSIT_CENTS || amountCents > MAX_DEPOSIT_CENTS) {
-    throw ApiError.badRequest('INVALID_AMOUNT', 'Choose an amount between 1 and 100,000.');
-  }
-  const payment = await demoPayment(user, 'wallet_deposit', amountCents);
-  await db.users.addToWallet(user.id, amountCents);
-  return { membership: await getStatus(await db.users.findById(user.id)), payment: toPayment(payment) };
-}
-
-/** Pays the Collector fee for the current period (demo). Collectors only. Resolves to { membership, payment }. */
+/** Pays the Collector fee for the current period in pennies. Collectors only. Resolves to { membership, payment }. */
 async function payCollectorFee(user) {
   if (user.status !== 'member' || user.membershipType !== 'collector') {
     throw ApiError.forbidden('COLLECTORS_ONLY', 'The Collector fee is for Collectors.');
   }
-  const payment = await demoPayment(user, 'collector_fee', env.COLLECTOR_FEE_CENTS);
+  const { payment } = await db.pennies.pay(user.id, 'collector_fee', env.COLLECTOR_FEE_CENTS, 'collector_fee');
   return { membership: await getStatus(await db.users.findById(user.id)), payment: toPayment(payment) };
 }
 
@@ -389,22 +364,22 @@ const MIN_DONATION_CENTS = 100;
 const MAX_DONATION_CENTS = 1000000;
 
 /**
- * A gift to Papolona from any signed-in user, apprentice or member (demo payments only for now): it goes
- * to the ecosystem like Papolona's share of sales. Resolves to { payment }.
+ * A gift of pennies to Papolona from any signed-in user, apprentice or member: it goes to the ecosystem
+ * like Papolona's share of sales. Resolves to { payment }.
  */
 async function donate(user, amountCents) {
   if (!Number.isInteger(amountCents) || amountCents < MIN_DONATION_CENTS || amountCents > MAX_DONATION_CENTS) {
-    throw ApiError.badRequest('INVALID_AMOUNT', 'Choose an amount between 1 and 10,000.');
+    throw ApiError.badRequest('INVALID_AMOUNT', 'Choose between 100 and 1,000,000 pennies.');
   }
-  const payment = await demoPayment(user, 'donation', amountCents);
+  const { payment } = await db.pennies.pay(user.id, 'donation', amountCents, 'donation');
   return { payment: toPayment(payment) };
 }
 
 module.exports = {
   getStatus,
   donate,
-  depositToWallet,
   payCollectorFee,
+  creatorStage,
   join,
   chooseType,
   activeStatus,

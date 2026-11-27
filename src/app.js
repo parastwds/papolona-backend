@@ -15,6 +15,7 @@ const statsRoutes = require('./modules/stats/stats.routes');
 const remindersRoutes = require('./modules/reminders/reminders.routes');
 const cronRoutes = require('./modules/reminders/cron.routes');
 const membershipRoutes = require('./modules/membership/membership.routes');
+const penniesRoutes = require('./modules/pennies/pennies.routes');
 const seriesRoutes = require('./modules/series/series.routes');
 const artworkRoutes = require('./modules/artwork/artwork.routes');
 const communityRoutes = require('./modules/community/community.routes');
@@ -50,6 +51,7 @@ function createApp() {
   v1.use('/stats', statsRoutes);
   v1.use('/reminders', remindersRoutes);
   v1.use('/membership', membershipRoutes);
+  v1.use('/pennies', penniesRoutes);
   v1.use('/series', seriesRoutes);
   v1.use('/artwork', artworkRoutes);
   v1.use('/market', marketRoutes);

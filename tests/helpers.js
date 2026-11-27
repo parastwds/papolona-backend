@@ -65,6 +65,9 @@ async function registerUser(overrides = {}) {
 
 const bearer = (token) => ({ Authorization: `Bearer ${token}` });
 
+/** Gives a user Papolona pennies (as if they bought a pack), so tests can pay for things. */
+const givePennies = (userId, amount = 1_000_000) => db.pennies.credit(userId, amount, 'pack');
+
 /** Extracts the 6-digit code from the latest reset email sent to `email`. */
 function lastResetCode(email) {
   const mail = [...outbox].reverse().find((m) => m.to === email && /reset code/i.test(m.subject));
@@ -85,6 +88,7 @@ module.exports = {
   submitQuestionnaire,
   registerUser,
   bearer,
+  givePennies,
   lastResetCode,
   lastChangeCode,
   nextPhone,

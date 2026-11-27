@@ -5,6 +5,7 @@ const users = require('../users/users.service');
 const series = require('../series/series.service');
 const judgeAi = require('./judge.ai');
 const promptAi = require('./prompt.ai');
+const pennies = require('../pennies/pennies.service');
 const { isTimeZone, partsInZone, zonedToUtc } = require('../../utils/zonedTime');
 const ApiError = require('../../utils/ApiError');
 const logger = require('../../utils/logger');
@@ -327,8 +328,14 @@ async function prompt(userId, drawId) {
     );
   }
 
-  const { options, model } = await promptAi.suggest({ question: latest.question, clue: latest.clue });
-  const saved = await db.clueDraws.savePrompt(userId, drawId, { options, model, promptedAt: new Date() });
+  // The suggestion costs a few pennies, given back when the AI can't be reached.
+  const saved = await pennies.chargeFor(userId, env.PENNY_PROMPT_PRICE, 'clue_prompt', async () => {
+    const { options, model } = await promptAi.suggest({ question: latest.question, clue: latest.clue });
+    const result = await db.clueDraws.savePrompt(userId, drawId, { options, model, promptedAt: new Date() });
+    // Another request prompted it first: this one is free.
+    if (!result && env.PENNY_PROMPT_PRICE) await db.pennies.credit(userId, env.PENNY_PROMPT_PRICE, 'refund');
+    return result;
+  });
   // Another request prompted it first (or it passed meanwhile): show what is there now.
   const reading = saved ?? (await db.clueDraws.latestForUser(userId));
   if (!saved && reading?.interpretation?.verdict === 'pass') {
@@ -354,23 +361,27 @@ async function generateClue(userId, { question }) {
       lastClue: toPublicDraw(latest),
     });
   }
-  const clue = await drawLetters();
-  // A reading drawn during an NFT series belongs to it, and moves its deadline on.
-  const active = await series.seriesForNewDraw(userId, now);
-  const draw = await db.clueDraws.createUnlessOpen({
-    userId,
-    clue,
-    question,
-    generatedAt: now,
-    seriesId: active?.id ?? null,
-    openSince: new Date(now.getTime() - windowMs()),
-  });
-  // Another request drew a clue first.
-  if (!draw) {
-    throw new ApiError(409, 'INTERPRET_FIRST', 'Interpret your last clue before drawing a new one.', {
-      lastClue: toPublicDraw(await db.clueDraws.latestForUser(userId)),
+  // Each reading costs a few pennies, given back when the clue can't be drawn.
+  const { draw, active } = await pennies.chargeFor(userId, env.PENNY_READING_PRICE, 'reading', async () => {
+    const clue = await drawLetters();
+    // A reading drawn during an NFT series belongs to it, and moves its deadline on.
+    const current = await series.seriesForNewDraw(userId, now);
+    const created = await db.clueDraws.createUnlessOpen({
+      userId,
+      clue,
+      question,
+      generatedAt: now,
+      seriesId: current?.id ?? null,
+      openSince: new Date(now.getTime() - windowMs()),
     });
-  }
+    // Another request drew a clue first.
+    if (!created) {
+      throw new ApiError(409, 'INTERPRET_FIRST', 'Interpret your last clue before drawing a new one.', {
+        lastClue: toPublicDraw(await db.clueDraws.latestForUser(userId)),
+      });
+    }
+    return { draw: created, active: current };
+  });
   // The journal entries written before this draw belong to it.
   await journal.sealOpenEntries(userId, draw.id);
   const progress = active ? await series.recordDraw(active.id, { at: now }) : null;

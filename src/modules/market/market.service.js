@@ -1,7 +1,5 @@
-const crypto = require('crypto');
 const env = require('../../config/env');
 const db = require('../../db');
-const billingService = require('../billing/billing.service');
 const { DuplicateError } = require('../../db/errors');
 const ApiError = require('../../utils/ApiError');
 const logger = require('../../utils/logger');
@@ -19,23 +17,28 @@ const standing = require('../membership/standing');
  *   beat the highest so far. When the days are up the highest bidder wins and pays their bid.
  * - Open to all: with no bids by then, anyone signed in can buy it at the starting price, apprentices and
  *   members who are not active included.
- * Papolona keeps MARKET_FEE_PERCENT of each sale and the seller gets the rest. Demo payments only for now:
- * nobody is charged and nothing is paid out. The seller can withdraw a listing only while it has no bids.
+ * Everything is in Papolona pennies: a bid holds the bidder's pennies until they are outbid (then they are
+ * given back), the winner's held bid pays for the NFT, a buyer pays at once. Papolona keeps
+ * MARKET_FEE_PERCENT of each sale and the seller's share goes into their wallet. The seller can withdraw a
+ * listing only while it has no bids.
  */
 
-// $1 to $100,000.
+// 100 to 10,000,000 pennies.
 const MIN_PRICE_CENTS = 100;
 const MAX_PRICE_CENTS = 10_000_000;
 const DAY = 24 * 60 * 60 * 1000;
 
 const isCollector = (user) => user.status === 'member' && user.membershipType === 'collector';
 
-/** The least the next bid may be once the highest is `highestCents`: AUCTION_MIN_INCREMENT_PERCENT more, and $1 more at least. */
+/** The least the next bid may be once the highest is `highestCents`: AUCTION_MIN_INCREMENT_PERCENT more, and 100 pennies more at least. */
 const minNextBid = (highestCents) =>
   highestCents + Math.max(100, Math.ceil((highestCents * env.AUCTION_MIN_INCREMENT_PERCENT) / 100));
 
+// Prices are in pennies (PNY); listings from before pennies were converted one penny for each cent.
 const formatMoney = (cents, currency) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(cents / 100);
+  currency === 'PNY' || !currency
+    ? `${cents.toLocaleString('en-US')} pennies`
+    : new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(cents / 100);
 
 /**
  * Where a listing stands in its sale: { phase: 'collectors' | 'open', collectorsUntil, bidCount,
@@ -125,22 +128,10 @@ async function announceSale(listing, winnerId) {
  * Resolves to the number settled.
  */
 async function settleDueAuctions(now = new Date(), ids = null) {
-  if (!env.DEMO_PAYMENTS) return 0;
   const due = (await db.market.dueAuctions(now)).filter((d) => !ids || ids.includes(d.id));
   let settled = 0;
-  for (const { id, winnerId } of due) {
-    const result = await db.market.settleAuction(
-      id,
-      {
-        feePercent: env.MARKET_FEE_PERCENT,
-        payment: {
-          provider: 'demo',
-          providerRef: `demo_${crypto.randomUUID()}`,
-          billing: await billingService.snapshot(winnerId),
-        },
-      },
-      now,
-    );
+  for (const { id } of due) {
+    const result = await db.market.settleAuction(id, { feePercent: env.MARKET_FEE_PERCENT }, now);
     if (!result) continue;
     settled += 1;
     await announceSale(result.listing, result.winnerId);
@@ -219,14 +210,14 @@ async function create(signedIn, { seriesId, priceCents }, now = new Date()) {
     );
   }
   if (priceCents < MIN_PRICE_CENTS || priceCents > MAX_PRICE_CENTS) {
-    throw ApiError.badRequest('INVALID_PRICE', 'Choose a price between $1 and $100,000.');
+    throw ApiError.badRequest('INVALID_PRICE', 'Choose a price between 100 and 10,000,000 pennies.');
   }
   // The seller may negotiate the price, provided it is no lower than Papolona's suggested minimum for the level.
   const suggested = series.conversionPrice(owned.length);
   if (suggested && priceCents < suggested.amountCents) {
     throw ApiError.badRequest(
       'BELOW_SUGGESTED_PRICE',
-      `Choose a price of at least $${(suggested.amountCents / 100).toLocaleString('en-US')}, Papolona's suggested minimum for this level.`,
+      `Choose a price of at least ${formatMoney(suggested.amountCents, 'PNY')}, Papolona's suggested minimum for this level.`,
       { suggestedResalePrice: suggested },
     );
   }
@@ -236,7 +227,7 @@ async function create(signedIn, { seriesId, priceCents }, now = new Date()) {
         seriesId,
         sellerId: user.id,
         priceCents,
-        currency: env.PAYMENTS_CURRENCY,
+        currency: 'PNY',
         collectorsUntil: new Date(now.getTime() + env.AUCTION_COLLECTOR_DAYS * DAY),
       },
       now,
@@ -273,7 +264,7 @@ async function bid(signedIn, id, { amountCents }, now = new Date()) {
     throw ApiError.forbidden('COLLECTORS_ONLY', 'Only Collector members can bid in the Collectors’ auction.');
   }
   if (!Number.isInteger(amountCents) || amountCents > MAX_PRICE_CENTS) {
-    throw ApiError.badRequest('INVALID_PRICE', 'Choose a bid between $1 and $100,000.');
+    throw ApiError.badRequest('INVALID_PRICE', 'Choose a bid between 100 and 10,000,000 pennies.');
   }
   const result = await db.market.placeBid(id, user.id, amountCents, minNextBid, now);
   switch (result.error) {
@@ -308,19 +299,8 @@ async function buy(user, id, now = new Date()) {
   if (offer.collectorsUntil && new Date(offer.collectorsUntil) > now) {
     throw ApiError.conflict('IN_AUCTION', 'This NFT is in the Collectors’ auction: Collectors bid on it until it closes.');
   }
-  if (!env.DEMO_PAYMENTS) throw new ApiError(503, 'PAYMENTS_UNAVAILABLE', 'Payments are not available yet.');
-
-  const result = await db.market.buy(
-    user.id,
-    id,
-    { feePercent: env.MARKET_FEE_PERCENT, payment: {
-        provider: 'demo',
-        providerRef: `demo_${crypto.randomUUID()}`,
-        billing: await billingService.snapshot(user.id),
-      },
-    },
-    now,
-  );
+  // Paid in pennies: 402 NOT_ENOUGH_PENNIES when short, and nothing changes hands.
+  const result = await db.market.buy(user.id, id, { feePercent: env.MARKET_FEE_PERCENT }, now);
   // Someone else bought it first, or the seller withdrew it: nothing was charged.
   if (!result) throw ApiError.conflict('LISTING_CLOSED', 'This NFT is no longer for sale.');
   return {
