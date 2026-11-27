@@ -58,6 +58,15 @@ module.exports = {
     await db().update(passwordResets).set({ createdAt: new Date(Date.now() - ms) });
   },
 
+  /** Moves the user's sign-up back by `days`, as if they had joined earlier (the apprenticeship's days). */
+  async backdateUser(userId, days) {
+    assertTest();
+    await db()
+      .update(users)
+      .set({ createdAt: new Date(Date.now() - days * 24 * 60 * 60 * 1000) })
+      .where(eq(users.id, userId));
+  },
+
   /** Gives the user `n` readings the judge passed, without drawing or judging (e.g. to finish probation). */
   async addPassedReadings(userId, n) {
     assertTest();

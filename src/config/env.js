@@ -64,8 +64,11 @@ const schema = z.object({
   QRNG_API_URL: z.string().url().default('https://api.quantumnumbers.anu.edu.au?length=10&type=hex8&size=2'),
   QRNG_API_KEY: z.string().optional(),
   // There is no limit on readings, but each clue must be interpreted before the next is drawn.
-  // Readings (clues drawn) that complete probation.
-  PROBATION_READINGS: z.coerce.number().int().positive().default(28),
+  // The apprenticeship (probation): it lasts at least PROBATION_DAYS from sign-up, and completes once the
+  // passed readings reach at least PROBATION_READINGS and are a multiple of PROBATION_STEP (30, 33, 36…).
+  PROBATION_DAYS: z.coerce.number().int().nonnegative().default(28),
+  PROBATION_READINGS: z.coerce.number().int().positive().default(30),
+  PROBATION_STEP: z.coerce.number().int().positive().default(3),
 
   // Membership is free once probation is complete. Members pay only to publish a completed series to
   // the public collective artwork.

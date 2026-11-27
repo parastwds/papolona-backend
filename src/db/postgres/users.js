@@ -170,6 +170,11 @@ module.exports = {
     return load(eq(U.id, id));
   },
 
+  /** Development only (seed scripts): moves the sign-up date, where the apprenticeship's days count from. */
+  async setCreatedAt(id, at) {
+    await db().update(U).set({ createdAt: at }).where(eq(U.id, id));
+  },
+
   async addIdentity(id, identity) {
     await translateDuplicate(() => db().insert(I).values({ ...identity, userId: id }));
   },

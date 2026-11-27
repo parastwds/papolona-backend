@@ -257,12 +257,62 @@ describe('GET /users/me/probation', () => {
     const { tokens } = await registerUser();
     const res = await probation(tokens.accessToken);
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ status: 'probation', readingsDone: 0, readingsRequired: 28, complete: false });
+    expect(res.body.data).toEqual({
+      status: 'probation',
+      readingsDone: 0,
+      readingsRequired: 30,
+      readingsStep: 3,
+      readingsTarget: 30,
+      readingsMet: false,
+      daysDone: 0,
+      daysRequired: 28,
+      daysMet: false,
+      endsAt: expect.any(String),
+      complete: false,
+    });
+    const days = (new Date(res.body.data.endsAt) - Date.now()) / (24 * 60 * 60 * 1000);
+    expect(days).toBeGreaterThan(27.9);
+    expect(days).toBeLessThanOrEqual(28);
+  });
+
+  test('complete after 28 days with 30 or more passed readings in a multiple of three', async () => {
+    const { tokens, user } = await registerUser();
+    const now = async () => (await probation(tokens.accessToken)).body.data;
+
+    // 30 readings on day 0: the readings are there, the days are not.
+    await db.testing.addPassedReadings(user.id, 30);
+    expect(await now()).toMatchObject({ readingsDone: 30, readingsTarget: 30, readingsMet: true, daysMet: false, complete: false });
+
+    await db.testing.backdateUser(user.id, 28);
+    expect(await now()).toMatchObject({ daysDone: 28, daysMet: true, complete: true });
+
+    // 31 and 32 are not multiples of three: they wait for 33.
+    await db.testing.addPassedReadings(user.id, 1);
+    expect(await now()).toMatchObject({ readingsDone: 31, readingsTarget: 33, readingsMet: false, complete: false });
+    await db.testing.addPassedReadings(user.id, 1);
+    expect(await now()).toMatchObject({ readingsDone: 32, readingsTarget: 33, complete: false });
+    await db.testing.addPassedReadings(user.id, 1);
+    expect(await now()).toMatchObject({ readingsDone: 33, readingsTarget: 33, readingsMet: true, complete: true });
+  });
+
+  test('after 28 days, fewer than 30 readings is not enough, even in a multiple of three', async () => {
+    const { tokens, user } = await registerUser();
+    await db.testing.backdateUser(user.id, 40);
+    await db.testing.addPassedReadings(user.id, 27);
+    expect((await probation(tokens.accessToken)).body.data).toMatchObject({
+      readingsDone: 27,
+      readingsTarget: 30,
+      daysDone: 40,
+      daysMet: true,
+      complete: false,
+    });
   });
 
   test('each passed interpretation is one reading; a fail or an uninterpreted clue is not; the target completes probation without changing the status', async () => {
-    const required = env.PROBATION_READINGS;
+    const saved = { readings: env.PROBATION_READINGS, step: env.PROBATION_STEP, days: env.PROBATION_DAYS };
     env.PROBATION_READINGS = 2;
+    env.PROBATION_STEP = 1;
+    env.PROBATION_DAYS = 0;
     try {
       const { tokens } = await registerUser();
       const drawAndInterpret = async () => {
@@ -282,14 +332,16 @@ describe('GET /users/me/probation', () => {
       expect(passed.body.data.probation).toMatchObject({ readingsDone: 1, readingsRequired: 2, complete: false });
 
       await drawAndInterpret();
-      expect((await probation(tokens.accessToken)).body.data).toEqual({
+      expect((await probation(tokens.accessToken)).body.data).toMatchObject({
         status: 'probation',
         readingsDone: 2,
         readingsRequired: 2,
         complete: true,
       });
     } finally {
-      env.PROBATION_READINGS = required;
+      env.PROBATION_READINGS = saved.readings;
+      env.PROBATION_STEP = saved.step;
+      env.PROBATION_DAYS = saved.days;
     }
   });
 

@@ -11,7 +11,8 @@
  *   npm run seed:test-accounts      (or: node scripts/seed-test-accounts.js)
  *
  * Re-running deletes and recreates both accounts, so they start over each time. The ready account
- * gets PROBATION_READINGS passed readings, one a day ending two days ago, so it can draw today's clue.
+ * gets PROBATION_READINGS passed readings (a multiple of PROBATION_STEP), one a day ending two days ago,
+ * and a sign-up date at least PROBATION_DAYS back, so its apprenticeship is complete.
  * No email is sent (the mail provider is switched off for this script). Refuses to run in production.
  */
 
@@ -62,10 +63,15 @@ async function createAccount(app, { name, email, password, phone }) {
   return res.body.data.user.id;
 }
 
-/** Passed readings, one a day, the newest two days ago (so the 24-hour clue limit has passed). */
+/**
+ * Passed readings, one a day, the newest two days ago: the minimum, rounded up to a multiple of the step.
+ * The sign-up moves back before the first of them, and at least the apprenticeship's days.
+ */
 async function completeProbation(userId) {
   const now = Date.now();
-  for (let i = env.PROBATION_READINGS + 1; i >= 2; i -= 1) {
+  const readings = Math.ceil(env.PROBATION_READINGS / env.PROBATION_STEP) * env.PROBATION_STEP;
+  await db.users.setCreatedAt(userId, new Date(now - Math.max(readings + 2, env.PROBATION_DAYS) * DAY));
+  for (let i = readings + 1; i >= 2; i -= 1) {
     const at = new Date(now - i * DAY);
     const draw = await db.clueDraws.create({
       userId,
