@@ -28,6 +28,8 @@ const toSeries = (row) =>
     mintChoiceAt: row.mintChoiceAt ?? null,
     creatorId: row.creatorId ?? row.userId,
     convertedAt: row.convertedAt ?? null,
+    refSeq: row.refSeq ?? null,
+    refCode: row.refCode ?? 'ME',
   };
 
 // Who completed a series: it stays theirs on the collective artwork even after it is sold.

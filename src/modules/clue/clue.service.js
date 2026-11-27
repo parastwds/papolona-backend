@@ -8,6 +8,7 @@ const promptAi = require('./prompt.ai');
 const { isTimeZone, partsInZone, zonedToUtc } = require('../../utils/zonedTime');
 const ApiError = require('../../utils/ApiError');
 const logger = require('../../utils/logger');
+const { sendMail } = require('../../utils/mailer');
 
 const CLUE_LENGTH = 6;
 // A random byte is an ASCII letter 52 times in 256 (~20%), so a 20-byte ANU response gives
@@ -114,8 +115,83 @@ const toPublicDraw = (draw) =>
         tileIndex: draw.tileIndex ?? null,
         // The splits offered when the user tapped the clue for a prompt; null if they never did.
         prompt: draw.prompt ?? null,
+        // The user's contest of a failed judgement ({ text, at }), and whether they may still send one.
+        contest: draw.contest ?? null,
+        canContest: canContest(draw),
       }
     : null;
+
+/**
+ * A reading may be contested once it has failed all MAX_READING_ATTEMPTS judgements, within
+ * CONTEST_WINDOW_DAYS of its last judgement, and only once.
+ */
+function canContest(draw, now = new Date()) {
+  const judged = draw.interpretation;
+  if (!judged || judged.verdict !== 'fail' || draw.contest) return false;
+  if ((draw.attempts ?? 0) < MAX_READING_ATTEMPTS) return false;
+  const judgedAt = judged.judgedAt ? new Date(judged.judgedAt).getTime() : now.getTime();
+  return now.getTime() - judgedAt <= env.CONTEST_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+}
+
+/** Who reads contests: CONTEST_EMAIL, else the SMTP account, else MAIL_FROM. */
+function contestInbox() {
+  if (env.CONTEST_EMAIL) return env.CONTEST_EMAIL;
+  if (env.SMTP_USER && env.SMTP_USER.includes('@')) return env.SMTP_USER;
+  const match = env.MAIL_FROM.match(/<([^>]+)>/);
+  return (match ? match[1] : env.MAIL_FROM).trim();
+}
+
+/** The email Papolona gets for a contest: who, the reading in full, the judge's verdict and the member's case. */
+const contestMail = (user, draw, text) => ({
+  subject: `Judgement contested: ${draw.clue} by ${user.name}`,
+  text: [
+    `${user.name} (${user.email}) contests the judgement on a reading that failed all ${MAX_READING_ATTEMPTS} attempts.`,
+    '',
+    `Question: ${draw.question || '(left blank)'}`,
+    `Clue string: ${draw.clue}`,
+    `Drawn: ${new Date(draw.generatedAt).toUTCString()}`,
+    '',
+    'Their last interpretation:',
+    draw.interpretation?.text ?? '',
+    '',
+    "Papolona's judgement (not coherent):",
+    draw.interpretation?.feedback ?? '',
+    '',
+    'Why they contest it:',
+    text,
+    '',
+    `Reading id: ${draw.id}`,
+    'Reply to this email to answer them.',
+  ].join('\n'),
+});
+
+/**
+ * The user contests the judgement on one of their readings that failed all its attempts: their case is
+ * emailed to Papolona (CONTEST_EMAIL) with the reading in full. Once per reading, within
+ * CONTEST_WINDOW_DAYS. Resolves to the reading.
+ */
+async function contest(user, drawId, { text }) {
+  const draw = await db.clueDraws.findOwn(user.id, drawId);
+  if (!draw) throw ApiError.notFound('READING_NOT_FOUND', 'Reading not found.');
+  if (draw.contest) throw ApiError.conflict('ALREADY_CONTESTED', 'You have already contested this judgement.');
+  if (!canContest(draw)) {
+    throw ApiError.conflict(
+      'CANNOT_CONTEST',
+      `Only a reading that failed all ${MAX_READING_ATTEMPTS} attempts can be contested, within ${env.CONTEST_WINDOW_DAYS} days.`,
+    );
+  }
+  const saved = await db.clueDraws.saveContest(user.id, drawId, {
+    text,
+    contestedAt: new Date(),
+    minAttempts: MAX_READING_ATTEMPTS,
+  });
+  // A second tap got there first.
+  if (!saved) throw ApiError.conflict('ALREADY_CONTESTED', 'You have already contested this judgement.');
+  await sendMail({ to: contestInbox(), ...contestMail(user, saved, text) }).catch((err) =>
+    logger.error(`Contest mail for reading ${drawId} failed`, err),
+  );
+  return toPublicDraw(saved);
+}
 
 // Prompts a month: generous while learning, fewer once the member is tuned in. Working without them is best.
 const PROMPTS_PER_MONTH = { apprentice: 90, member: 30 };
@@ -310,6 +386,7 @@ async function rate(userId, drawId, { eeriness, satisfaction }) {
 
 module.exports = {
   rate,
+  contest,
   generateClue,
   getStatus,
   listHistory,

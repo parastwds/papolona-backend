@@ -289,13 +289,19 @@ describe('marketplace', () => {
     expect((await api().get('/api/v1/artwork/wall').set(bearer(token))).body.data.tiles).toEqual([]);
   });
 
-  test('anyone can buy: the NFT moves to the buyer and the seller gets half', async () => {
+  test('after the Collectors’ auction closes without bids, anyone can buy: the NFT moves to the buyer and the seller gets half', async () => {
     const seller = await activeSeller('Ada Lovelace');
     const listing = (await list(seller.token, seller.nft.id, 20000)).body.data.listing;
 
-    // An apprentice sees the listing, without the seller's split, and buys it.
+    // During the Collectors' auction an apprentice neither sees nor buys it.
     const apprentice = await registerUser({ name: 'Grace Hopper' });
     const token = apprentice.tokens.accessToken;
+    expect((await api().get('/api/v1/market/listings').set(bearer(token))).body.data.listings).toEqual([]);
+    expect((await api().get(`/api/v1/market/listings/${listing.id}`).set(bearer(token))).status).toBe(404);
+    expect((await buy(token, listing.id)).body.error.code).toBe('IN_AUCTION');
+    await db.testing.endAuction(listing.id);
+
+    // Now open to all: the apprentice sees the listing, without the seller's split, and buys it.
     const market = (await api().get('/api/v1/market/listings').set(bearer(token))).body.data;
     expect(market.listings).toHaveLength(1);
     expect(market.listings[0].mine).toBe(false);
@@ -307,6 +313,15 @@ describe('marketplace', () => {
     expect(bought.status).toBe(201);
     expect(bought.body.data.payment).toMatchObject({ purpose: 'nft_purchase', amountCents: 20000 });
     expect(bought.body.data.series).toMatchObject({ id: seller.nft.id, acquired: true, listing: null });
+    // Its last sale travels with it, with who sold and who bought.
+    const [owned] = (await api().get('/api/v1/series').set(bearer(token))).body.data.series;
+    expect(owned.lastSale).toEqual({
+      priceCents: 20000,
+      currency: expect.any(String),
+      soldAt: expect.any(String),
+      buyer: 'Grace H.',
+      seller: 'Ada L.',
+    });
     expect(bought.body.data.listing.status).toBe('sold');
 
     const sale = await db.market.findOffer(listing.id);
@@ -348,6 +363,7 @@ describe('marketplace', () => {
   test('two buyers at once: one gets it, the other pays nothing', async () => {
     const seller = await activeSeller();
     const listing = (await list(seller.token, seller.nft.id, 9000)).body.data.listing;
+    await db.testing.endAuction(listing.id);
     const a = await member('Buyer One');
     const b = await member('Buyer Two');
     const [x, y] = await Promise.all([buy(a.token, listing.id), buy(b.token, listing.id)]);
@@ -372,9 +388,158 @@ describe('marketplace', () => {
   test('buying is refused while demo payments are off', async () => {
     const seller = await activeSeller();
     const listing = (await list(seller.token, seller.nft.id, 9000)).body.data.listing;
+    await db.testing.endAuction(listing.id);
     env.DEMO_PAYMENTS = false;
     const buyer = await member('Buyer');
     expect((await buy(buyer.token, listing.id)).status).toBe(503);
+  });
+});
+
+describe('reference numbers', () => {
+  test('each series gets a reference: membership code, level and a running number', async () => {
+    const m = await member('Ada Lovelace');
+    const first = await complete(m.token, 3);
+    // A member without a membership type is coded ME.
+    expect(first.reference).toMatch(/^ME1-\d{5}$/);
+    await db.users.update(m.userId, { membershipType: 'creator' });
+    const second = await complete(m.token, 6);
+    expect(second.reference).toMatch(/^CR2-\d{5}$/);
+    const n = (ref) => Number(ref.split('-')[1]);
+    expect(n(second.reference)).toBeGreaterThan(n(first.reference));
+    // The code is the membership it was made under, even after a change.
+    await db.users.update(m.userId, { membershipType: 'explorer' });
+    const list = (await api().get('/api/v1/series').set(bearer(m.token))).body.data.series;
+    expect(list.map((s) => s.reference).sort()).toEqual([first.reference, second.reference].sort());
+  });
+});
+
+describe('Collectors’ auction', () => {
+  const bid = (token, id, amountCents) =>
+    api().post(`/api/v1/market/listings/${id}/bids`).set(bearer(token)).send({ amountCents });
+  const getListing = async (token, id) =>
+    (await api().get(`/api/v1/market/listings/${id}`).set(bearer(token))).body.data.listing;
+
+  async function collector(name) {
+    const { tokens, user } = await registerUser({ name });
+    await db.users.promoteToMember(user.id, new Date(), 'collector');
+    return { token: tokens.accessToken, userId: user.id };
+  }
+
+  test('a new listing is a Collectors’ auction for 30 days, seen by Collectors only', async () => {
+    const seller = await activeSeller('Ada Lovelace');
+    const listing = (await list(seller.token, seller.nft.id, 12000)).body.data.listing;
+    const days = (new Date(listing.auction.collectorsUntil) - Date.now()) / (24 * 60 * 60 * 1000);
+    expect(days).toBeGreaterThan(29.9);
+    expect(days).toBeLessThanOrEqual(30);
+    expect(listing.auction).toMatchObject({ phase: 'collectors', bidCount: 0, minNextBidCents: 12000, canBid: false });
+
+    const c = await collector('Cora Collector');
+    const market = (await api().get('/api/v1/market/listings').set(bearer(c.token))).body.data;
+    expect(market.listings.map((l) => l.id)).toEqual([listing.id]);
+    expect(market.listings[0].auction).toMatchObject({ phase: 'collectors', canBid: true, canBuy: false });
+    expect(market.auctionDays).toBe(30);
+
+    // An Explorer (or any non-Collector member) sees nothing yet and cannot bid.
+    const explorer = await member('Ed Explorer');
+    expect((await api().get('/api/v1/market/listings').set(bearer(explorer.token))).body.data.listings).toEqual([]);
+    expect((await bid(explorer.token, listing.id, 12000)).body.error.code).toBe('COLLECTORS_ONLY');
+    // The seller cannot bid on their own NFT, and nobody can buy it outright during the auction.
+    expect((await bid(seller.token, listing.id, 12000)).body.error.code).toBe('OWN_LISTING');
+    expect((await buy(c.token, listing.id)).body.error.code).toBe('IN_AUCTION');
+  });
+
+  test('each bid must beat the highest; the highest bidder wins when the auction closes', async () => {
+    const seller = await activeSeller('Ada Lovelace');
+    const listing = (await list(seller.token, seller.nft.id, 10000)).body.data.listing;
+    const a = await collector('Cora Collector');
+    const b = await collector('Bea Bidder');
+
+    // The first bid starts at the starting price.
+    const low = await bid(a.token, listing.id, 9999);
+    expect(low.status).toBe(400);
+    expect(low.body.error).toMatchObject({ code: 'BID_TOO_LOW', details: { minBidCents: 10000 } });
+    const first = await bid(a.token, listing.id, 10000);
+    expect(first.status).toBe(201);
+    expect(first.body.data.listing.auction).toMatchObject({
+      bidCount: 1,
+      highestBidCents: 10000,
+      highestBidMine: true,
+      canBid: false,
+      // 5% more, so $105.
+      minNextBidCents: 10500,
+    });
+    // The highest bidder cannot outbid themselves; the next bid must be 5% higher.
+    expect((await bid(a.token, listing.id, 20000)).body.error.code).toBe('ALREADY_HIGHEST');
+    expect((await bid(b.token, listing.id, 10400)).body.error).toMatchObject({ details: { minBidCents: 10500 } });
+    expect((await bid(b.token, listing.id, 15000)).status).toBe(201);
+    expect((await getListing(a.token, listing.id)).auction).toMatchObject({ highestBidMine: false, canBid: true });
+    // The seller sees who leads; with bids it can no longer be withdrawn.
+    expect((await getListing(seller.token, listing.id)).auction).toMatchObject({
+      bidCount: 2,
+      highestBidCents: 15000,
+      highestBidder: { name: 'Bea B.' },
+    });
+    const withdraw = await api().delete(`/api/v1/market/listings/${listing.id}`).set(bearer(seller.token));
+    expect(withdraw.body.error.code).toBe('HAS_BIDS');
+
+    // The auction closes: the next read settles it to the highest bidder at their bid.
+    await db.testing.endAuction(listing.id);
+    expect((await bid(a.token, listing.id, 20000)).body.error.code).toBe('AUCTION_ENDED');
+    const settled = await getListing(seller.token, listing.id);
+    expect(settled).toMatchObject({
+      status: 'sold',
+      priceCents: 15000,
+      feeCents: 7500,
+      sellerProceedsCents: 7500,
+      buyer: { id: b.userId, name: 'Bea B.' },
+    });
+    const purchases = await db.payments.list(b.userId);
+    expect(purchases.filter((p) => p.purpose === 'nft_purchase').map((p) => p.amountCents)).toEqual([15000]);
+    expect((await db.payments.list(a.userId)).filter((p) => p.purpose === 'nft_purchase')).toEqual([]);
+    const won = (await api().get('/api/v1/series').set(bearer(b.token))).body.data.series;
+    expect(won.map((s) => s.id)).toEqual([seller.nft.id]);
+    // Both sides were told.
+    const { outbox } = require('../src/utils/mailer');
+    expect(outbox.some((m) => m.subject === 'You won a Papolona auction')).toBe(true);
+    expect(outbox.some((m) => m.subject === 'Your NFT has sold at auction')).toBe(true);
+  });
+
+  test('the dispatcher settles closed auctions on its own', async () => {
+    const seller = await activeSeller();
+    const listing = (await list(seller.token, seller.nft.id, 9000)).body.data.listing;
+    const c = await collector('Cora Collector');
+    await bid(c.token, listing.id, 9000);
+    const { dispatchDue } = require('../src/modules/reminders/reminders.service');
+    expect((await dispatchDue()).auctions).toBe(0);
+    await db.testing.endAuction(listing.id);
+    expect((await dispatchDue()).auctions).toBe(1);
+    expect((await db.market.findOffer(listing.id)).status).toBe('sold');
+  });
+
+  test('without bids it stays for sale and opens to everyone at the starting price', async () => {
+    const seller = await activeSeller();
+    const listing = (await list(seller.token, seller.nft.id, 9000)).body.data.listing;
+    await db.testing.endAuction(listing.id);
+    const { dispatchDue } = require('../src/modules/reminders/reminders.service');
+    expect((await dispatchDue()).auctions).toBe(0);
+    const anyone = await registerUser({ name: 'Grace Hopper' });
+    const open = await getListing(anyone.tokens.accessToken, listing.id);
+    expect(open).toMatchObject({ status: 'active', priceCents: 9000 });
+    expect(open.auction).toMatchObject({ phase: 'open', canBuy: true, canBid: false });
+    // Collectors can no longer bid; anyone buys it outright.
+    const c = await collector('Cora Collector');
+    expect((await bid(c.token, listing.id, 20000)).body.error.code).toBe('AUCTION_ENDED');
+    expect((await buy(anyone.tokens.accessToken, listing.id)).status).toBe(201);
+  });
+
+  test('two Collectors bidding the same amount at once: only one bid is taken', async () => {
+    const seller = await activeSeller();
+    const listing = (await list(seller.token, seller.nft.id, 9000)).body.data.listing;
+    const a = await collector('Cora Collector');
+    const b = await collector('Bea Bidder');
+    const [x, y] = await Promise.all([bid(a.token, listing.id, 9000), bid(b.token, listing.id, 9000)]);
+    expect([x.status, y.status].sort()).toEqual([201, 400]);
+    expect((await getListing(a.token, listing.id)).auction.bidCount).toBe(1);
   });
 });
 

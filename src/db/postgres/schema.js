@@ -6,7 +6,7 @@
  * Allowed values (status, source...) are CHECK constraints, which are easier to change than enum types.
  */
 const { sql } = require('drizzle-orm');
-const { pgTable, uuid, text, integer, boolean, timestamp, jsonb, doublePrecision, index, uniqueIndex, check, primaryKey } =
+const { pgTable, uuid, text, integer, serial, boolean, timestamp, jsonb, doublePrecision, index, uniqueIndex, check, primaryKey } =
   require('drizzle-orm/pg-core');
 
 const id = () => uuid('id').primaryKey().default(sql`uuidv7()`);
@@ -273,6 +273,11 @@ const nftSeries = pgTable(
     // Converted into an NFT (a paid conversion, demo payments for now), or null.
     convertedAt: at('converted_at'),
     conversionPaymentId: uuid('conversion_payment_id').references(() => payments.id, { onDelete: 'set null' }),
+    // Its reference number: a running number across Papolona, and the membership it was made under
+    // (EX Explorer, CR Creator, CO Collector, UN Universal, ME a member from before memberships existed).
+    // Shown as e.g. CR3-00042 (membership, level, number).
+    refSeq: serial('ref_seq'),
+    refCode: text('ref_code').notNull().default('ME'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -325,6 +330,10 @@ const clueDraws = pgTable(
     // One per clue (tapping again shows the same choices); each counts against the monthly allowance.
     prompt: jsonb('prompt'),
     promptedAt: at('prompted_at'),
+    // The user's contest of the judgement on a reading that failed all its attempts: why they think it is
+    // coherent, emailed to Papolona. One per reading.
+    contestText: text('contest_text'),
+    contestedAt: at('contested_at'),
   },
   (t) => [
     index('clue_draws_user_generated_idx').on(t.userId, t.generatedAt.desc()),
@@ -454,14 +463,18 @@ const stoneOrders = pgTable(
 const LISTING_STATUSES = ['active', 'sold', 'cancelled'];
 
 // The marketplace: an active member offers one of their NFTs at a price. A sale moves the NFT to the
-// buyer; the seller gets their share and Papolona keeps fee_cents.
+// buyer; the seller gets their share and Papolona keeps fee_cents. A listing opens as an auction for
+// Collectors until collectors_until (bids in nft_bids, the highest wins); with no bids by then it is open
+// to everyone at price_cents. Listings from before auctions have no collectors_until: open to everyone.
 const nftListings = pgTable(
   'nft_listings',
   {
     id: id(),
     seriesId: uuid('series_id').notNull().references(() => nftSeries.id, { onDelete: 'cascade' }),
     sellerId: uuid('seller_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    // The starting price; once sold, what the buyer paid (the winning bid, after an auction).
     priceCents: integer('price_cents').notNull(),
+    collectorsUntil: at('collectors_until'),
     currency: text('currency').notNull(),
     status: text('status').notNull().default('active'),
     buyerId: uuid('buyer_id').references(() => users.id, { onDelete: 'set null' }),
@@ -480,6 +493,22 @@ const nftListings = pgTable(
     uniqueIndex('nft_listings_one_active_idx').on(t.seriesId).where(sql`${t.status} = 'active'`),
     index('nft_listings_active_idx').on(t.status, t.createdAt),
     index('nft_listings_seller_idx').on(t.sellerId, t.createdAt),
+  ],
+);
+
+// Collectors' bids on a listing during its auction. Each must beat the highest so far.
+const nftBids = pgTable(
+  'nft_bids',
+  {
+    id: id(),
+    listingId: uuid('listing_id').notNull().references(() => nftListings.id, { onDelete: 'cascade' }),
+    bidderId: uuid('bidder_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    amountCents: integer('amount_cents').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check('nft_bids_amount_check', sql`${t.amountCents} > 0`),
+    index('nft_bids_listing_idx').on(t.listingId, t.amountCents),
   ],
 );
 
@@ -562,6 +591,78 @@ const journalInsights = pgTable(
   ],
 );
 
+const DM_STATUSES = ['pending', 'accepted', 'declined'];
+
+// Direct messages: one thread per pair of users (user_a is the smaller id, user_b the larger). It opens as
+// a message request from requested_by; once the other accepts, both can write. Each side's read_at marks
+// what they have seen.
+const dmThreads = pgTable(
+  'dm_threads',
+  {
+    id: id(),
+    userA: uuid('user_a').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    userB: uuid('user_b').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    requestedBy: uuid('requested_by').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending'),
+    acceptedAt: at('accepted_at'),
+    lastMessageAt: at('last_message_at'),
+    userAReadAt: at('user_a_read_at'),
+    userBReadAt: at('user_b_read_at'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('dm_threads_pair_idx').on(t.userA, t.userB),
+    index('dm_threads_user_b_idx').on(t.userB),
+    check('dm_threads_status_check', oneOf(t.status, DM_STATUSES)),
+    check('dm_threads_order_check', sql`${t.userA} < ${t.userB}`),
+  ],
+);
+
+const dmMessages = pgTable(
+  'dm_messages',
+  {
+    id: id(),
+    threadId: uuid('thread_id').notNull().references(() => dmThreads.id, { onDelete: 'cascade' }),
+    senderId: uuid('sender_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    text: text('text').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index('dm_messages_thread_idx').on(t.threadId, t.createdAt)],
+);
+
+// A user blocking another: neither can message the other, and they stop appearing to each other in search.
+const userBlocks = pgTable(
+  'user_blocks',
+  {
+    blockerId: uuid('blocker_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    blockedId: uuid('blocked_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.blockerId, t.blockedId] }), index('user_blocks_blocked_idx').on(t.blockedId)],
+);
+
+const ACCESS_STATUSES = ['pending', 'approved', 'denied'];
+
+// A member asking to see another member's readings and NFTs on their profile. The owner approves or denies.
+const profileAccess = pgTable(
+  'profile_access',
+  {
+    id: id(),
+    ownerId: uuid('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    viewerId: uuid('viewer_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending'),
+    answeredAt: at('answered_at'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('profile_access_pair_idx').on(t.ownerId, t.viewerId),
+    index('profile_access_owner_status_idx').on(t.ownerId, t.status),
+    check('profile_access_status_check', oneOf(t.status, ACCESS_STATUSES)),
+  ],
+);
+
 module.exports = {
   questionnaires,
   users,
@@ -584,6 +685,11 @@ module.exports = {
   billingProfiles,
   retreatApplications,
   nftListings,
+  nftBids,
+  dmThreads,
+  dmMessages,
+  userBlocks,
+  profileAccess,
   MINT_CHOICES,
   BADGES,
 };

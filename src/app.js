@@ -19,6 +19,8 @@ const seriesRoutes = require('./modules/series/series.routes');
 const artworkRoutes = require('./modules/artwork/artwork.routes');
 const communityRoutes = require('./modules/community/community.routes');
 const marketRoutes = require('./modules/market/market.routes');
+const dmsRoutes = require('./modules/dms/dms.routes');
+const membersRoutes = require('./modules/members/members.routes');
 
 function createApp() {
   const app = express();
@@ -51,6 +53,8 @@ function createApp() {
   v1.use('/series', seriesRoutes);
   v1.use('/artwork', artworkRoutes);
   v1.use('/market', marketRoutes);
+  v1.use('/dms', dmsRoutes);
+  v1.use('/members', membersRoutes);
   v1.use('/community', communityRoutes);
   v1.use('/internal', cronRoutes); // scheduler-only, guarded by CRON_SECRET
   app.use('/api/v1', v1);

@@ -27,19 +27,44 @@ async function getMe(user) {
   return { user: await userPayload(user), settings: user.settings, legal: await legalStatus(user) };
 }
 
+const DAY = 24 * 60 * 60 * 1000;
+
+/** The first count of passed readings that qualifies from `done` on: at least the minimum, and a multiple of the step. */
+function probationTarget(done) {
+  const step = env.PROBATION_STEP;
+  const from = Math.max(done, env.PROBATION_READINGS);
+  return Math.ceil(from / step) * step;
+}
+
 /**
- * Home screen: progress through probation. Each clue drawn is one reading; PROBATION_READINGS of them
- * complete it. Completing does not change the status: membership also needs payment (a later phase).
+ * Home screen: progress through the apprenticeship (probation). It lasts at least PROBATION_DAYS from
+ * sign-up, and completes once the readings the AI judge passed are at least PROBATION_READINGS and a
+ * multiple of PROBATION_STEP: 30, 33, 36… (31 or 32 wait for 33). Completing does not change the
+ * status: the user then joins and chooses a membership.
  */
 async function getProbation(user) {
-  const readingsRequired = env.PROBATION_READINGS;
-  // A reading counts once the AI judge passes its interpretation: one day of probation each.
+  // A reading counts once the AI judge passes its interpretation.
   const readingsDone = await db.clueDraws.countPassed(user.id);
+  const startedAt = new Date(user.createdAt ?? Date.now());
+  const daysRequired = env.PROBATION_DAYS;
+  const daysDone = Math.max(0, Math.floor((Date.now() - startedAt.getTime()) / DAY));
+  const readingsTarget = probationTarget(readingsDone);
+  const readingsMet = readingsDone === readingsTarget;
+  const daysMet = daysDone >= daysRequired;
   return {
     status: user.status,
     readingsDone,
-    readingsRequired,
-    complete: user.status === 'member' || readingsDone >= readingsRequired,
+    // The minimum, and the count to reach next (the minimum, or the next multiple of the step above it).
+    readingsRequired: env.PROBATION_READINGS,
+    readingsStep: env.PROBATION_STEP,
+    readingsTarget,
+    readingsMet,
+    daysDone,
+    daysRequired,
+    daysMet,
+    // When the apprenticeship's days are up.
+    endsAt: new Date(startedAt.getTime() + daysRequired * DAY).toISOString(),
+    complete: user.status === 'member' || (readingsMet && daysMet),
   };
 }
 

@@ -61,6 +61,8 @@ const toDraw = (row) =>
     tileIndex: row.tileIndex ?? null,
     // The multiple-choice splits the AI offered when the user tapped the clue for a prompt (null if never).
     prompt: row.prompt?.options ?? null,
+    // The user's contest of a failed judgement (null if never).
+    contest: row.contestedAt ? { text: row.contestText, at: row.contestedAt } : null,
   };
 
 const clueDraws = {
@@ -210,6 +212,33 @@ const clueDraws = {
       .from(D)
       .where(and(eq(D.userId, userId), gte(D.promptedAt, from)));
     return row.n;
+  },
+
+  /** One of the user's readings, or null. */
+  async findOwn(userId, id) {
+    const [row] = await db().select().from(D).where(and(eq(D.id, id), eq(D.userId, userId)));
+    return row ? toDraw({ ...row, nextAvailableAt: undefined }) : null;
+  },
+
+  /**
+   * Saves the user's contest of a failed reading, once: only a fail with `minAttempts` judgements, not
+   * contested before. Returns the updated reading, or null when that does not hold (two taps included).
+   */
+  async saveContest(userId, id, { text, contestedAt, minAttempts }) {
+    const [row] = await db()
+      .update(D)
+      .set({ contestText: text, contestedAt })
+      .where(
+        and(
+          eq(D.id, id),
+          eq(D.userId, userId),
+          eq(D.verdict, 'fail'),
+          gte(D.attempts, minAttempts),
+          isNull(D.contestedAt),
+        ),
+      )
+      .returning();
+    return row ? toDraw({ ...row, nextAvailableAt: undefined }) : null;
   },
 
   /**

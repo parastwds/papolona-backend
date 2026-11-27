@@ -26,5 +26,6 @@ module.exports = {
   changeLimiter: make(15, 20, 'CHANGE_RATE_LIMITED'), // email / phone / password change codes (request + confirm)
   clueLimiter: make(15, 60, 'CLUE_RATE_LIMITED'), // each clue is a paid ANU quantum number call
   insightsLimiter: make(15, 60, 'INSIGHTS_RATE_LIMITED'), // journal readings may call the AI model
+  messageLimiter: make(15, 300, 'MESSAGE_RATE_LIMITED'), // direct messages and requests
   journalPhotoLimiter: make(15, 60, 'JOURNAL_PHOTO_RATE_LIMITED'), // each journal photo is a Cloudinary upload
 };

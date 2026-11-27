@@ -69,8 +69,8 @@ describe('NFT series', () => {
       [2, 1, 2, 'common', null, false],
       [3, 1, 3, 'common', null, true],
       [6, 2, 3, 'epic', null, true],
-      [12, 3, 4, 'mythic', null, true],
-      [24, 4, 6, 'legendary', null, true],
+      [12, 4, 3, 'mythic', null, true],
+      [24, 8, 3, 'legendary', null, true],
     ]);
     expect(res.body.data.publish).toMatchObject({ free: true, price: { amountCents: 0, currency: env.PAYMENTS_CURRENCY } });
   });

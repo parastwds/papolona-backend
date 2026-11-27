@@ -1,7 +1,7 @@
-const { and, desc, eq, inArray, isNull, lt, max } = require('drizzle-orm');
+const { and, asc, count, desc, eq, inArray, isNull, lt, lte, max, or } = require('drizzle-orm');
 const { alias } = require('drizzle-orm/pg-core');
 const { db } = require('./connection');
-const { nftListings: L, nftSeries: S, payments: P, stoneOrders: O, users: U } = require('./schema');
+const { nftBids: Bid, nftListings: L, nftSeries: S, payments: P, stoneOrders: O, users: U } = require('./schema');
 const { translateDuplicate } = require('./shared');
 
 const toListing = (row) =>
@@ -12,6 +12,7 @@ const toListing = (row) =>
     priceCents: row.priceCents,
     currency: row.currency,
     status: row.status,
+    collectorsUntil: row.collectorsUntil ?? null,
     buyerId: row.buyerId ?? null,
     feeCents: row.feeCents ?? null,
     sellerProceedsCents: row.sellerProceedsCents ?? null,
@@ -43,19 +44,159 @@ const toOffer = (row) =>
 
 const isDuplicate = (err) => err?.code === '23505' || err?.cause?.code === '23505';
 
+// Open to everyone: no Collectors' auction, or it has ended.
+const openToAll = (now) => or(isNull(L.collectorsUntil), lte(L.collectorsUntil, now));
+
+/** The highest bid on a listing (the earliest of equal ones), within `tx`. */
+async function highestBid(tx, listingId) {
+  const [row] = await tx
+    .select()
+    .from(Bid)
+    .where(eq(Bid.listingId, listingId))
+    .orderBy(desc(Bid.amountCents), asc(Bid.createdAt))
+    .limit(1);
+  return row ?? null;
+}
+
 const market = {
-  /** The marketplace: open listings, newest first, before `before` (a createdAt) if given. */
-  async listActive({ before = null, limit = 30 } = {}) {
+  /**
+   * The marketplace: open listings, newest first, before `before` (a createdAt) if given. Listings still in
+   * their Collectors' auction are left out unless `collectors` (the viewer is a Collector).
+   */
+  async listActive({ before = null, limit = 30, collectors = false, now = new Date() } = {}) {
     const rows = await db()
       .select(listingColumns)
       .from(L)
       .innerJoin(S, eq(S.id, L.seriesId))
       .innerJoin(U, eq(U.id, L.sellerId))
       .leftJoin(B, eq(B.id, L.buyerId))
-      .where(and(eq(L.status, 'active'), before ? lt(L.createdAt, before) : undefined))
+      .where(
+        and(
+          eq(L.status, 'active'),
+          before ? lt(L.createdAt, before) : undefined,
+          collectors ? undefined : openToAll(now),
+        ),
+      )
       .orderBy(desc(L.createdAt), desc(L.id))
       .limit(limit);
     return rows.map(toOffer);
+  },
+
+  /**
+   * The bids on these listings: { [listingId]: { count, highestCents, highestBidderId, highestBidderName } }.
+   * Listings without bids are left out.
+   */
+  async bidSummaries(listingIds) {
+    if (listingIds.length === 0) return {};
+    const counts = await db()
+      .select({ listingId: Bid.listingId, n: count() })
+      .from(Bid)
+      .where(inArray(Bid.listingId, listingIds))
+      .groupBy(Bid.listingId);
+    const top = await db()
+      .selectDistinctOn([Bid.listingId], {
+        listingId: Bid.listingId,
+        amountCents: Bid.amountCents,
+        bidderId: Bid.bidderId,
+        bidderName: U.name,
+      })
+      .from(Bid)
+      .innerJoin(U, eq(U.id, Bid.bidderId))
+      .where(inArray(Bid.listingId, listingIds))
+      .orderBy(Bid.listingId, desc(Bid.amountCents), asc(Bid.createdAt));
+    const n = Object.fromEntries(counts.map((c) => [c.listingId, c.n]));
+    return Object.fromEntries(
+      top.map((t) => [
+        t.listingId,
+        { count: n[t.listingId] ?? 1, highestCents: t.amountCents, highestBidderId: t.bidderId, highestBidderName: t.bidderName },
+      ]),
+    );
+  },
+
+  /**
+   * A Collector's bid during a listing's auction, checked and saved under a lock on the listing so bids
+   * arrive one at a time. `minNext(highestCents)` is the least a bid may be once there is one. Resolves to
+   * { bid } or { error }: 'CLOSED' (sold, withdrawn or not found), 'ENDED' (the auction is over or there is
+   * none), 'OWN_LISTING', 'ALREADY_HIGHEST', or 'TOO_LOW' with { minCents }.
+   */
+  async placeBid(listingId, bidderId, amountCents, minNext, now = new Date()) {
+    return db().transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(L)
+        .where(and(eq(L.id, listingId), eq(L.status, 'active')))
+        .for('update');
+      if (!row) return { error: 'CLOSED' };
+      if (!row.collectorsUntil || row.collectorsUntil <= now) return { error: 'ENDED' };
+      if (row.sellerId === bidderId) return { error: 'OWN_LISTING' };
+      const top = await highestBid(tx, listingId);
+      if (top?.bidderId === bidderId) return { error: 'ALREADY_HIGHEST' };
+      const minCents = top ? minNext(top.amountCents) : row.priceCents;
+      if (amountCents < minCents) return { error: 'TOO_LOW', minCents };
+      const [bid] = await tx.insert(Bid).values({ listingId, bidderId, amountCents, createdAt: now }).returning();
+      return { bid };
+    });
+  },
+
+  /** Auctions that ended by `now` with at least one bid, still to be settled: [{ id, winnerId }]. */
+  async dueAuctions(now = new Date()) {
+    const rows = await db()
+      .selectDistinctOn([L.id], { id: L.id, winnerId: Bid.bidderId })
+      .from(L)
+      .innerJoin(Bid, eq(Bid.listingId, L.id))
+      .where(and(eq(L.status, 'active'), lte(L.collectorsUntil, now)))
+      .orderBy(L.id, desc(Bid.amountCents), asc(Bid.createdAt));
+    return rows;
+  },
+
+  /**
+   * Settles an ended auction: sells the NFT to the highest bidder at their bid, in one transaction (their
+   * payment, the listing closed with the fee split, the NFT moved to them). Resolves to
+   * { listing, payment, series, winnerId }, or null when it is not due (already settled, withdrawn, no bids).
+   */
+  async settleAuction(id, { feePercent, payment }, now = new Date()) {
+    return db().transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(L)
+        .where(and(eq(L.id, id), eq(L.status, 'active'), lte(L.collectorsUntil, now)))
+        .for('update');
+      if (!row) return null;
+      const top = await highestBid(tx, id);
+      if (!top) return null;
+      const feeCents = Math.round((top.amountCents * feePercent) / 100);
+      const [paid] = await tx
+        .insert(P)
+        .values({
+          userId: top.bidderId,
+          purpose: 'nft_purchase',
+          status: 'succeeded',
+          amountCents: top.amountCents,
+          currency: row.currency,
+          ...payment,
+        })
+        .returning();
+      const [listing] = await tx
+        .update(L)
+        .set({
+          status: 'sold',
+          priceCents: top.amountCents,
+          buyerId: top.bidderId,
+          salePaymentId: paid.id,
+          feeCents,
+          sellerProceedsCents: top.amountCents - feeCents,
+          soldAt: now,
+          updatedAt: now,
+        })
+        .where(eq(L.id, id))
+        .returning();
+      const [series] = await tx
+        .update(S)
+        .set({ userId: top.bidderId, updatedAt: now })
+        .where(eq(S.id, row.seriesId))
+        .returning();
+      return { listing: toListing(listing), payment: paid, series, winnerId: top.bidderId };
+    });
   },
 
   /** One listing with its NFT and seller, whatever its status, or null. */
@@ -68,6 +209,30 @@ const market = {
       .leftJoin(B, eq(B.id, L.buyerId))
       .where(eq(L.id, id));
     return toOffer(row ?? null);
+  },
+
+  /**
+   * The latest sale of each of these series: { [seriesId]: { priceCents, currency, soldAt, buyerName,
+   * sellerName } }. Series never sold are left out.
+   */
+  async lastSalesBySeries(seriesIds) {
+    if (seriesIds.length === 0) return {};
+    const Seller = alias(U, 'seller');
+    const rows = await db()
+      .selectDistinctOn([L.seriesId], {
+        seriesId: L.seriesId,
+        priceCents: L.priceCents,
+        currency: L.currency,
+        soldAt: L.soldAt,
+        buyerName: B.name,
+        sellerName: Seller.name,
+      })
+      .from(L)
+      .innerJoin(Seller, eq(Seller.id, L.sellerId))
+      .leftJoin(B, eq(B.id, L.buyerId))
+      .where(and(inArray(L.seriesId, seriesIds), eq(L.status, 'sold')))
+      .orderBy(L.seriesId, desc(L.soldAt));
+    return Object.fromEntries(rows.map((r) => [r.seriesId, r]));
   },
 
   /** Open listings of these series: { [seriesId]: listing }. */
@@ -97,12 +262,12 @@ const market = {
    * Opens a listing and places the NFT on the collective artwork if it isn't there yet: selling it makes it
    * public. Throws DuplicateError when the series is already listed.
    */
-  async create({ seriesId, sellerId, priceCents, currency }, now = new Date()) {
+  async create({ seriesId, sellerId, priceCents, currency, collectorsUntil = null }, now = new Date()) {
     const [row] = await translateDuplicate(() =>
       db().transaction(async (tx) => {
         const inserted = await tx
           .insert(L)
-          .values({ seriesId, sellerId, priceCents, currency, status: 'active' })
+          .values({ seriesId, sellerId, priceCents, currency, collectorsUntil, status: 'active' })
           .returning();
         await tx
           .update(S)
@@ -114,29 +279,43 @@ const market = {
     return toListing(row);
   },
 
-  /** Withdraws the seller's open listing. Resolves to it, or null. */
+  /**
+   * Withdraws the seller's open listing, unless Collectors have bid on it. Resolves to { listing },
+   * { error: 'HAS_BIDS' }, or null when it is not open.
+   */
   async cancel(sellerId, id, now = new Date()) {
-    const [row] = await db()
-      .update(L)
-      .set({ status: 'cancelled', cancelledAt: now, updatedAt: now })
-      .where(and(eq(L.id, id), eq(L.sellerId, sellerId), eq(L.status, 'active')))
-      .returning();
-    return toListing(row ?? null);
+    return db().transaction(async (tx) => {
+      const [open] = await tx
+        .select()
+        .from(L)
+        .where(and(eq(L.id, id), eq(L.sellerId, sellerId), eq(L.status, 'active')))
+        .for('update');
+      if (!open) return null;
+      if (await highestBid(tx, id)) return { error: 'HAS_BIDS' };
+      const [row] = await tx
+        .update(L)
+        .set({ status: 'cancelled', cancelledAt: now, updatedAt: now })
+        .where(eq(L.id, id))
+        .returning();
+      return { listing: toListing(row) };
+    });
   },
 
   /**
    * Sells an open listing to the buyer, all in one transaction: records the buyer's payment, closes the
-   * listing with the fee split and moves the NFT to the buyer. Resolves to { listing, payment, series },
-   * or null when the listing is no longer open (sold to someone else first, or withdrawn).
+   * listing with the fee split and moves the NFT to the buyer. Only once any Collectors' auction has
+   * ended without bids. Resolves to { listing, payment, series }, or null when the listing is no longer
+   * open (sold to someone else first, withdrawn, still in its auction, or won by a bidder).
    */
   async buy(buyerId, id, { feePercent, payment }, now = new Date()) {
     return db().transaction(async (tx) => {
       const [row] = await tx
         .select()
         .from(L)
-        .where(and(eq(L.id, id), eq(L.status, 'active')))
+        .where(and(eq(L.id, id), eq(L.status, 'active'), openToAll(now)))
         .for('update');
       if (!row) return null;
+      if (await highestBid(tx, id)) return null;
       const feeCents = Math.round((row.priceCents * feePercent) / 100);
       const [paid] = await tx
         .insert(P)

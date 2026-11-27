@@ -64,8 +64,11 @@ const schema = z.object({
   QRNG_API_URL: z.string().url().default('https://api.quantumnumbers.anu.edu.au?length=10&type=hex8&size=2'),
   QRNG_API_KEY: z.string().optional(),
   // There is no limit on readings, but each clue must be interpreted before the next is drawn.
-  // Readings (clues drawn) that complete probation.
-  PROBATION_READINGS: z.coerce.number().int().positive().default(28),
+  // The apprenticeship (probation): it lasts at least PROBATION_DAYS from sign-up, and completes once the
+  // passed readings reach at least PROBATION_READINGS and are a multiple of PROBATION_STEP (30, 33, 36…).
+  PROBATION_DAYS: z.coerce.number().int().nonnegative().default(28),
+  PROBATION_READINGS: z.coerce.number().int().positive().default(30),
+  PROBATION_STEP: z.coerce.number().int().positive().default(3),
 
   // Membership is free once probation is complete. Members pay only to publish a completed series to
   // the public collective artwork.
@@ -107,8 +110,18 @@ const schema = z.object({
   CREATOR_DEPOSIT_CENTS: z.coerce.number().int().positive().default(9000),
   // Where each retreat application is emailed. Unset = the SMTP account (SMTP_USER), else MAIL_FROM's address.
   RETREAT_APPLICATIONS_EMAIL: z.string().email().optional(),
+  // Where a member's contest of a failed judgement is emailed (Papolona's owner). Unset = the SMTP account
+  // (SMTP_USER), else MAIL_FROM's address. A reading that failed all its attempts may be contested within
+  // CONTEST_WINDOW_DAYS of its last judgement.
+  CONTEST_EMAIL: z.string().email().optional(),
+  CONTEST_WINDOW_DAYS: z.coerce.number().positive().default(90),
   // Papolona's share of each marketplace sale, in percent; the seller gets the rest.
   MARKET_FEE_PERCENT: z.coerce.number().int().min(0).max(100).default(50),
+  // A new listing is first an auction for Collectors, for this many days; the highest bid wins. With no
+  // bids by then it opens to everyone at its starting price.
+  AUCTION_COLLECTOR_DAYS: z.coerce.number().positive().default(30),
+  // Each bid must beat the highest so far by at least this percent of it (and at least $1).
+  AUCTION_MIN_INCREMENT_PERCENT: z.coerce.number().min(0).max(100).default(5),
   // A reading must be completed (passed) within this long of drawing its clue, or it fails; a member's
   // series it was drawn in fails with it. A warning goes out when the last hour starts.
   READING_WINDOW_HOURS: z.coerce.number().positive().default(12),

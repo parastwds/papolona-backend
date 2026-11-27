@@ -11,7 +11,8 @@ const standing = require('./standing');
 
 /**
  * Membership, in three steps:
- * - Apprentice ('probation'): the first PROBATION_READINGS passed readings.
+ * - Apprentice ('probation'): at least PROBATION_DAYS from sign-up, and at least PROBATION_READINGS passed
+ *   readings in a multiple of PROBATION_STEP (see users.getProbation).
  * - Member: once the apprenticeship is complete the user joins the collective and chooses a membership
  *   (MEMBERSHIP_TYPES: Explorer, Creator or Collector), which unlocks series. Members keep their emblems in
  *   their gallery and can buy on the marketplace. The membership is separate from the questionnaire's
@@ -234,7 +235,7 @@ async function join(user, typeId) {
   if (!probation.complete) {
     throw ApiError.forbidden(
       'PROBATION_INCOMPLETE',
-      `Membership opens after the apprenticeship: ${probation.readingsDone} of ${probation.readingsRequired} readings passed.`,
+      `Membership opens after the apprenticeship: ${probation.daysRequired} days and ${probation.readingsRequired} or more passed readings in a multiple of ${probation.readingsStep}. So far: day ${probation.daysDone}, ${probation.readingsDone} readings passed.`,
     );
   }
   if (type.priceCents() > 0 && !env.DEMO_PAYMENTS) {

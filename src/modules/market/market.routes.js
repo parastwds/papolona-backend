@@ -22,6 +22,7 @@ const createSchema = z.object({
   seriesId: s.id,
   priceCents: z.coerce.number().int(),
 });
+const bidSchema = z.object({ amountCents: z.coerce.number().int() });
 
 /**
  * GET /market/listings?before=&limit= — open listings, newest first:
@@ -57,14 +58,24 @@ router.post('/listings', changeLimiter, validate({ body: createSchema }), async 
   res.status(201).json({ success: true, data: await marketService.create(req.user, req.body) });
 });
 
-/** DELETE /market/listings/:id — withdraws the user's open listing. Returns { listing }. 409 LISTING_CLOSED. */
+/** DELETE /market/listings/:id — withdraws the user's open listing while it has no bids. Returns { listing }. 409 LISTING_CLOSED / HAS_BIDS. */
 router.delete('/listings/:id', changeLimiter, validate({ params: idParams }), async (req, res) => {
   res.json({ success: true, data: await marketService.cancel(req.user, req.params.id) });
 });
 
 /**
- * POST /market/listings/:id/buy — buys an open listing (demo payment); the NFT becomes the buyer's.
- * Returns { listing, series, payment }. 409 OWN_LISTING / LISTING_CLOSED, 503 PAYMENTS_UNAVAILABLE.
+ * POST /market/listings/:id/bids — { amountCents }: a Collector's bid in the listing's Collectors' auction.
+ * Returns { listing }. 403 COLLECTORS_ONLY, 400 BID_TOO_LOW (details.minBidCents) / INVALID_PRICE,
+ * 409 OWN_LISTING / ALREADY_HIGHEST / AUCTION_ENDED / LISTING_CLOSED.
+ */
+router.post('/listings/:id/bids', changeLimiter, validate({ params: idParams, body: bidSchema }), async (req, res) => {
+  res.status(201).json({ success: true, data: await marketService.bid(req.user, req.params.id, req.body) });
+});
+
+/**
+ * POST /market/listings/:id/buy — buys a listing whose Collectors' auction closed without bids (demo
+ * payment); the NFT becomes the buyer's. Returns { listing, series, payment }. 409 OWN_LISTING /
+ * LISTING_CLOSED / IN_AUCTION, 503 PAYMENTS_UNAVAILABLE.
  */
 router.post('/listings/:id/buy', changeLimiter, validate({ params: idParams }), async (req, res) => {
   res.status(201).json({ success: true, data: await marketService.buy(req.user, req.params.id) });

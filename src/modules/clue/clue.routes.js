@@ -26,6 +26,13 @@ const interpretSchema = z.object({
   source: z.enum(['text', 'voice']),
 });
 const readingParams = z.object({ id: s.id });
+const contestSchema = z.object({
+  text: z
+    .string({ error: 'Say why you believe your reading is coherent.' })
+    .trim()
+    .min(20, 'Say a little more about why you believe your reading is coherent.')
+    .max(3000),
+});
 const rating = z.coerce.number().int().min(1).max(10);
 // The app asks for satisfaction only (five stars, sent as 2–10); eeriness is optional and kept when left out.
 const ratingSchema = z.object({ eeriness: rating.optional(), satisfaction: rating });
@@ -90,6 +97,24 @@ router.post(
   validate({ params: readingParams }),
   async (req, res) => {
     res.status(201).json({ success: true, data: await clueService.prompt(req.user.id, req.validatedParams.id) });
+  },
+);
+
+/**
+ * POST /clue-string/:id/contest — { text }: contests the judgement on a reading that failed all three attempts,
+ * within 90 days. Emailed to Papolona with the reading. Returns the reading (with contest). 409 CANNOT_CONTEST /
+ * ALREADY_CONTESTED, 404 READING_NOT_FOUND.
+ */
+router.post(
+  '/clue-string/:id/contest',
+  insightsLimiter,
+  requireAuth,
+  noStore,
+  validate({ params: readingParams, body: contestSchema }),
+  async (req, res) => {
+    res
+      .status(201)
+      .json({ success: true, data: await clueService.contest(req.user, req.validatedParams.id, req.body) });
   },
 );
 

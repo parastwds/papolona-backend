@@ -14,8 +14,10 @@ afterAll(() => {
   env.PROBATION_READINGS = realRequired;
 });
 
+// Signed up long enough ago that the apprenticeship's days are done: only the readings decide.
 async function signedIn({ passed = 0 } = {}) {
   const { tokens, user } = await registerUser();
+  await db.testing.backdateUser(user.id, env.PROBATION_DAYS);
   if (passed) await db.testing.addPassedReadings(user.id, passed);
   return { token: tokens.accessToken, userId: user.id };
 }
