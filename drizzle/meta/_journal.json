@@ -155,6 +155,20 @@
       "when": 1795518402638,
       "tag": "0021_reading_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1795769643249,
+      "tag": "0022_nft_auctions",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1795770588256,
+      "tag": "0023_reading_contests",
+      "breakpoints": true
     }
   ]
 }

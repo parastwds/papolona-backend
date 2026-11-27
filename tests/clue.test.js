@@ -121,6 +121,8 @@ describe('POST /clue-string', () => {
       seriesId: null,
       tileIndex: null,
       prompt: null,
+      contest: null,
+      canContest: false,
       series: null,
     });
     expect(res.headers['cache-control']).toBe('no-store');
@@ -198,6 +200,8 @@ describe('GET /clue-string', () => {
       seriesId: null,
       tileIndex: null,
       prompt: null,
+      contest: null,
+      canContest: false,
     });
   });
 });
@@ -227,7 +231,7 @@ describe('GET /clue-string/history', () => {
       'Question number 3?',
       'Question number 2?',
     ]);
-    expect(Object.keys(first.body.data.readings[0]).sort()).toEqual(['attempts', 'attemptsLeft', 'clue', 'deadlineAt', 'expired', 'generatedAt', 'id', 'interpretation', 'maxAttempts', 'prompt', 'promptAvailableAt', 'question', 'ratings', 'seriesId', 'tileIndex']);
+    expect(Object.keys(first.body.data.readings[0]).sort()).toEqual(['attempts', 'attemptsLeft', 'canContest', 'clue', 'contest', 'deadlineAt', 'expired', 'generatedAt', 'id', 'interpretation', 'maxAttempts', 'prompt', 'promptAvailableAt', 'question', 'ratings', 'seriesId', 'tileIndex']);
     expect(first.body.data.nextCursor).toBe(first.body.data.readings[2].id);
 
     const second = (await history(tokens.accessToken, `?limit=3&before=${first.body.data.nextCursor}`)).body.data;
@@ -454,6 +458,43 @@ describe('POST /clue-string/:id/interpretation', () => {
     expect((await generate(tokens.accessToken)).body.error.code).toBe('INTERPRET_FIRST');
     await db.testing.backdateDraws(user.id, 12 * 60 * 60 * 1000 + 1000);
     expect((await generate(tokens.accessToken)).status).toBe(201);
+  });
+
+  test('a reading that failed all three attempts can be contested once, by email to Papolona', async () => {
+    const { tokens } = await registerUser({ name: 'Cara Contest' });
+    const draw = (await generate(tokens.accessToken)).body.data;
+    const contest = (text) =>
+      api().post(`/api/v1/clue-string/${draw.id}/contest`).set(bearer(tokens.accessToken)).send({ text });
+    const why = 'Each bite comes from the clue string and together they answer my question.';
+    judgeReply = failReply;
+
+    // Not while attempts are left.
+    const first = await interpret(tokens.accessToken, draw.id);
+    expect(first.body.data.reading).toMatchObject({ canContest: false, contest: null });
+    expect((await contest(why)).body.error.code).toBe('CANNOT_CONTEST');
+    await interpret(tokens.accessToken, draw.id);
+    const last = await interpret(tokens.accessToken, draw.id);
+    expect(last.body.data.reading).toMatchObject({ attemptsLeft: 0, canContest: true });
+
+    expect((await contest('too short')).status).toBe(400);
+    const { outbox } = require('../src/utils/mailer');
+    const before = outbox.length;
+    const sent = await contest(why);
+    expect(sent.status).toBe(201);
+    expect(sent.body.data).toMatchObject({ canContest: false, contest: { text: why, at: expect.any(String) } });
+    const mail = outbox.slice(before).find((m) => /^Judgement contested/.test(m.subject));
+    expect(mail.subject).toContain(draw.clue);
+    expect(mail.text).toContain(why);
+    expect(mail.text).toContain('Cara Contest');
+
+    // Once only; and not someone else's reading.
+    expect((await contest(why)).body.error.code).toBe('ALREADY_CONTESTED');
+    const other = await registerUser();
+    const theirs = await api()
+      .post(`/api/v1/clue-string/${draw.id}/contest`)
+      .set(bearer(other.tokens.accessToken))
+      .send({ text: why });
+    expect(theirs.status).toBe(404);
   });
 
   test('a resubmitted pass counts; a passed reading cannot be judged again', async () => {

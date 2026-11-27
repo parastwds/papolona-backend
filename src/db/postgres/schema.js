@@ -325,6 +325,10 @@ const clueDraws = pgTable(
     // One per clue (tapping again shows the same choices); each counts against the monthly allowance.
     prompt: jsonb('prompt'),
     promptedAt: at('prompted_at'),
+    // The user's contest of the judgement on a reading that failed all its attempts: why they think it is
+    // coherent, emailed to Papolona. One per reading.
+    contestText: text('contest_text'),
+    contestedAt: at('contested_at'),
   },
   (t) => [
     index('clue_draws_user_generated_idx').on(t.userId, t.generatedAt.desc()),
@@ -454,14 +458,18 @@ const stoneOrders = pgTable(
 const LISTING_STATUSES = ['active', 'sold', 'cancelled'];
 
 // The marketplace: an active member offers one of their NFTs at a price. A sale moves the NFT to the
-// buyer; the seller gets their share and Papolona keeps fee_cents.
+// buyer; the seller gets their share and Papolona keeps fee_cents. A listing opens as an auction for
+// Collectors until collectors_until (bids in nft_bids, the highest wins); with no bids by then it is open
+// to everyone at price_cents. Listings from before auctions have no collectors_until: open to everyone.
 const nftListings = pgTable(
   'nft_listings',
   {
     id: id(),
     seriesId: uuid('series_id').notNull().references(() => nftSeries.id, { onDelete: 'cascade' }),
     sellerId: uuid('seller_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    // The starting price; once sold, what the buyer paid (the winning bid, after an auction).
     priceCents: integer('price_cents').notNull(),
+    collectorsUntil: at('collectors_until'),
     currency: text('currency').notNull(),
     status: text('status').notNull().default('active'),
     buyerId: uuid('buyer_id').references(() => users.id, { onDelete: 'set null' }),
@@ -480,6 +488,22 @@ const nftListings = pgTable(
     uniqueIndex('nft_listings_one_active_idx').on(t.seriesId).where(sql`${t.status} = 'active'`),
     index('nft_listings_active_idx').on(t.status, t.createdAt),
     index('nft_listings_seller_idx').on(t.sellerId, t.createdAt),
+  ],
+);
+
+// Collectors' bids on a listing during its auction. Each must beat the highest so far.
+const nftBids = pgTable(
+  'nft_bids',
+  {
+    id: id(),
+    listingId: uuid('listing_id').notNull().references(() => nftListings.id, { onDelete: 'cascade' }),
+    bidderId: uuid('bidder_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    amountCents: integer('amount_cents').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check('nft_bids_amount_check', sql`${t.amountCents} > 0`),
+    index('nft_bids_listing_idx').on(t.listingId, t.amountCents),
   ],
 );
 
@@ -584,6 +608,7 @@ module.exports = {
   billingProfiles,
   retreatApplications,
   nftListings,
+  nftBids,
   MINT_CHOICES,
   BADGES,
 };

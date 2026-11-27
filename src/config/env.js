@@ -110,8 +110,18 @@ const schema = z.object({
   CREATOR_DEPOSIT_CENTS: z.coerce.number().int().positive().default(9000),
   // Where each retreat application is emailed. Unset = the SMTP account (SMTP_USER), else MAIL_FROM's address.
   RETREAT_APPLICATIONS_EMAIL: z.string().email().optional(),
+  // Where a member's contest of a failed judgement is emailed (Papolona's owner). Unset = the SMTP account
+  // (SMTP_USER), else MAIL_FROM's address. A reading that failed all its attempts may be contested within
+  // CONTEST_WINDOW_DAYS of its last judgement.
+  CONTEST_EMAIL: z.string().email().optional(),
+  CONTEST_WINDOW_DAYS: z.coerce.number().positive().default(90),
   // Papolona's share of each marketplace sale, in percent; the seller gets the rest.
   MARKET_FEE_PERCENT: z.coerce.number().int().min(0).max(100).default(50),
+  // A new listing is first an auction for Collectors, for this many days; the highest bid wins. With no
+  // bids by then it opens to everyone at its starting price.
+  AUCTION_COLLECTOR_DAYS: z.coerce.number().positive().default(90),
+  // Each bid must beat the highest so far by at least this percent of it (and at least $1).
+  AUCTION_MIN_INCREMENT_PERCENT: z.coerce.number().min(0).max(100).default(5),
   // A reading must be completed (passed) within this long of drawing its clue, or it fails; a member's
   // series it was drawn in fails with it. A warning goes out when the last hour starts.
   READING_WINDOW_HOURS: z.coerce.number().positive().default(12),

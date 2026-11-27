@@ -6,6 +6,7 @@ const { users, journalEntries, passwordResets, pendingChanges, clueDraws, nftSer
 
 // Everything a test creates; the seeded questionnaire and app config are kept.
 const USER_DATA = [
+  'nft_bids',
   'nft_listings',
   'stone_orders',
   'billing_profiles',
@@ -56,6 +57,12 @@ module.exports = {
   async backdatePasswordResets(ms) {
     assertTest();
     await db().update(passwordResets).set({ createdAt: new Date(Date.now() - ms) });
+  },
+
+  /** Ends a listing's Collectors' auction now, as if its days had passed. */
+  async endAuction(listingId) {
+    assertTest();
+    await db().execute(sql`update nft_listings set collectors_until = now() - interval '1 second' where id = ${listingId}`);
   },
 
   /** Moves the user's sign-up back by `days`, as if they had joined earlier (the apprenticeship's days). */

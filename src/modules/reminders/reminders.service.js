@@ -221,13 +221,16 @@ async function dispatchDue(now = new Date()) {
   const readings = await dispatchReadings(now);
   const active = await dispatchActive(now);
   const lastHour = await dispatchLastHour(now);
+  // Collectors' auctions that have closed: each NFT goes to its highest bidder. Required here, not at the
+  // top, to keep the market's dependencies out of the reminders module's load order.
+  const auctions = await require('../market/market.service').settleDueAuctions(now);
   const total = [reminders, readings, active, lastHour].reduce((n, r) => n + r.sent + r.failed, 0);
   if (total > 0) {
     logger.info(
       `Reminders: ${reminders.sent} sent, ${reminders.failed} failed; reading reminders: ${readings.sent} sent, ${readings.failed} failed; active membership: ${active.sent} sent, ${active.failed} failed; last hour: ${lastHour.sent} sent, ${lastHour.failed} failed`,
     );
   }
-  return { reminders, readings, active, lastHour };
+  return { reminders, readings, active, lastHour, auctions };
 }
 
 module.exports = { list, create, update, remove, dispatchDue, MAX_REMINDERS };

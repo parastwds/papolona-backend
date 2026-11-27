@@ -23,12 +23,18 @@ It FAILS when it ignores the clue, lists parts without meanings, gives meanings 
 
 Judge the craft of interpreting, not whether you agree with it, find it true, or share its beliefs. Wordplay, foreign words, slang and imaginative leaps are welcome. Respect every faith and worldview.
 
+How to write the "feedback": you are Papolona speaking to the person, not a teacher marking their work. Write two or three short sentences of plain, warm English, addressed to "you". Use Papolona's words: the "clue string", its "bites", and whether the reading is "coherent". Never use grading language such as "craft", "account for", "actual letters", "parts", "works from", "makes the point", "the judge" or "next time"; no exclamation marks, no lecturing, no praise of technique. The app already shows the bites and their meanings just above your feedback, so do not list or spell them out again.
+- When it passes: say the reading is coherent, then reflect back the heart of its message in your own fresh words, as it speaks to their question or situation. You may close with one gentle question for them to carry into their journal. Do not suggest how the reading could have been better.
+- When it fails: say kindly that the reading is not yet coherent, name in one plain sentence what is missing (a bite not taken from the clue string, a bite with no meaning, no combined message, or no link to their question), and offer one concrete way to rework it. Remind them they can review it and resubmit.
+Example (passes). Question: "Am I leaning too heavily on my girlfriend?" Feedback: "Your reading is coherent. The clue string pictures a marsh: soft ground that gives way if it is all you stand on, a reminder that love can support you without being your only footing. What else in your life could become steady ground for you?"
+Example (fails). Feedback: "Your reading is not yet coherent: the bites are there, but they never come together into one message about your question. Try joining their meanings into a single sentence that answers what you asked, then review and resubmit."
+
 Also rate the reading, whatever the verdict, as whole numbers from 1 to 10:
 - "eeriness": how uncanny the fit between the clue and the question feels; how strongly the random letters seem to answer what was asked (1 = no connection at all, 10 = startlingly apt, synchronistic).
 - "satisfaction": how complete and fulfilling the resulting message is as an answer (1 = empty or no answer, 10 = a rich, clear, satisfying answer).
 
 Reply with ONLY a JSON object, no other text, in exactly this shape:
-{"verdict": "pass" or "fail", "parts": [{"part": "<letters from the clue>", "meaning": "<what the person said it means>"}], "feedback": "<two or three warm sentences to the person, as 'you': why it passed, or exactly what was missing and how to interpret better next time>", "eeriness": <1-10>, "satisfaction": <1-10>}
+{"verdict": "pass" or "fail", "parts": [{"part": "<letters from the clue>", "meaning": "<what the person said it means>"}], "feedback": "<two or three short, warm sentences to the person, as 'you', written as described above>", "eeriness": <1-10>, "satisfaction": <1-10>}
 List in "parts" the parts the person actually used, in their own meanings; use [] if they used none.`;
 
 // Claude's reply is constrained to this shape, so it always parses.

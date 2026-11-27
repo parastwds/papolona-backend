@@ -73,7 +73,15 @@ function shuffledTiles(length) {
   return tiles;
 }
 
-const toPublicListing = (l) => l && { id: l.id, priceCents: l.priceCents, currency: l.currency, createdAt: l.createdAt };
+// collectorsUntil: when its Collectors' auction closes (null for listings from before auctions).
+const toPublicListing = (l) =>
+  l && {
+    id: l.id,
+    priceCents: l.priceCents,
+    currency: l.currency,
+    createdAt: l.createdAt,
+    collectorsUntil: l.collectorsUntil ?? null,
+  };
 
 /**
  * What the app sees: never the reveal order, so the tiles still to come stay hidden. `listing` is its open
